@@ -272,8 +272,8 @@ fun ContentScope.Tile(
                                 brush =
                                     Brush.verticalGradient(
                                         listOf(
-                                            Color.White.copy(alpha = 0.40f),
-                                            Color.White.copy(alpha = 0.06f),
+                                            Color.White.copy(alpha = 0.28f),
+                                            Color.White.copy(alpha = 0.04f),
                                         )
                                     ),
                                 shape = tileShape,

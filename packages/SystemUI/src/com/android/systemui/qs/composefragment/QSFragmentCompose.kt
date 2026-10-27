@@ -154,6 +154,8 @@ import com.android.systemui.qs.panels.shared.model.QSFragmentComposeClippingTabl
 import com.android.systemui.qs.panels.ui.compose.EditMode
 import com.android.systemui.qs.panels.ui.compose.QuickQuickSettings
 import com.android.systemui.qs.panels.ui.compose.TileGrid
+import com.android.settingslib.volume.domain.interactor.AudioVolumeInteractor
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.InfiniteGridLayout
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOQsStyle
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalUseCircularQsTileShapes
 import com.android.systemui.qs.shared.ui.QuickSettings.Elements
@@ -195,6 +197,8 @@ constructor(
     @ShadeDisplayAware private val configurationController: ConfigurationController,
     @Main private val mainHandler: Handler,
     private val userTracker: UserTracker,
+    private val infiniteGridLayout: InfiniteGridLayout,
+    private val audioVolumeInteractor: AudioVolumeInteractor,
 ) : LifecycleFragment(), QS, Dumpable {
 
     private val scrollListener = MutableStateFlow<QS.ScrollListener?>(null)
@@ -995,6 +999,38 @@ constructor(
                                         end = qsHorizontalMargin(),
                                     )
                         ) {
+                            if (miracloQsStyle) {
+                                Box {
+                                    GridAnchor()
+                                    MiraCLOQuickSettingsLayout(
+                                        tiles = containerViewModel.tileGridViewModel.tileViewModels,
+                                        gridLayout = containerViewModel.tileGridViewModel.gridLayout,
+                                        infiniteGridLayout = infiniteGridLayout,
+                                        brightnessViewModel =
+                                            containerViewModel.brightnessSliderViewModel,
+                                        audioVolumeInteractor = audioVolumeInteractor,
+                                        showMedia = viewModel.qsMediaVisible,
+                                        media = {
+                                            MediaObject(
+                                                mediaHost = viewModel.qsMediaHost,
+                                                mediaViewModelFactory =
+                                                    viewModel.mediaViewModelFactory,
+                                                mediaPresentationStyle =
+                                                    MediaPresentationStyle.Compressed,
+                                                onSwipeToDismiss = viewModel::onMediaSwipeToDismiss,
+                                                behavior = viewModel.qsMediaUiBehavior,
+                                                visible = isListening,
+                                                // Fully qualified: the local `Media` lambda shadows the class here.
+                                                location =
+                                                    com.android.systemui.media.remedia.ui.compose
+                                                        .Media.Location.QS,
+                                                expansion = { viewModel.expansionState.progress },
+                                            )
+                                        },
+                                        listening = isListening,
+                                    )
+                                }
+                            } else {
                             QuickSettingsLayout(
                                 brightness =
                                     if (viewModel.isBrightnessSliderVisible) {
@@ -1008,6 +1044,7 @@ constructor(
                                 showSlider = showBrightness,
                                 sliderAtTop = !brightnessAtBottom,
                             )
+                            }
                         }
                     }
                 }

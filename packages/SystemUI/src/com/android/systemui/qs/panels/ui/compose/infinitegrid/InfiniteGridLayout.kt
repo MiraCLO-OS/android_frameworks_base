@@ -41,6 +41,7 @@ import com.android.systemui.grid.ui.compose.VerticalSpannedGrid
 import com.android.systemui.haptics.msdl.qs.TileHapticsViewModel
 import com.android.systemui.lifecycle.rememberViewModel
 import com.android.systemui.qs.panels.shared.model.SizedTileImpl
+import com.android.systemui.qs.panels.ui.compose.BounceableInfo
 import com.android.systemui.qs.panels.ui.compose.EditTileListState
 import com.android.systemui.qs.panels.ui.compose.PaginatableGridLayout
 import com.android.systemui.qs.panels.ui.compose.TileListener
@@ -96,13 +97,12 @@ constructor(
         // Tiles or largeTiles may be updated while this is composed, so listen to any changes
         val sizedTiles =
             remember(tiles, largeTiles, largeTilesSpan, miracloStyle) {
-                val sized =
-                    tiles.map {
-                        SizedTileImpl(it, if (largeTiles.contains(it.spec)) largeTilesSpan else 1)
-                    }
-                // MiraCLO style: wide tiles first, then the round icon tiles, as in ColorOS.
-                // The order inside each group is kept.
-                if (miracloStyle) sized.sortedBy { if (it.width > 1) 0 else 1 } else sized
+                // MiraCLO style: the fixed wide tiles (Wi-Fi, mobile data, Bluetooth) are drawn
+                // separately by the MiraCLO layout, so every tile in this grid is a round icon tile.
+                tiles.map {
+                    val wide = !miracloStyle && largeTiles.contains(it.spec)
+                    SizedTileImpl(it, if (wide) largeTilesSpan else 1)
+                }
             }
         val squishiness by viewModel.squishinessViewModel.squishiness.collectAsStateWithLifecycle()
         val scope = rememberCoroutineScope()
@@ -120,7 +120,7 @@ constructor(
                 modifier = Modifier.fillMaxWidth(),
             ) { spanIndex, column, isFirstInColumn, isLastInColumn ->
                 val it = sizedTiles[spanIndex]
-                val iconOnly = iconTilesViewModel.isIconTile(it.tile.spec)
+                val iconOnly = miracloStyle || iconTilesViewModel.isIconTile(it.tile.spec)
                 Element(it.tile.spec.toElementKey(), Modifier) {
                     Tile(
                         tile = it.tile,
@@ -152,6 +152,46 @@ constructor(
         }
 
         TileListener(tiles, listening)
+    }
+
+    /**
+     * MiraCLO: draws a single wide tile outside the grid (used for the fixed Wi-Fi, mobile data
+     * and Bluetooth slots of the MiraCLO Quick Settings layout). The caller is responsible for
+     * making the tile listen, e.g. with [TileListener].
+     */
+    @Composable
+    fun ContentScope.MiraCLOWideTile(
+        tile: TileViewModel,
+        listening: () -> Boolean,
+        modifier: Modifier = Modifier,
+    ) {
+        val context = LocalContext.current
+        val textFeedbackViewModel =
+            rememberViewModel(traceName = "InfiniteGridLayout.MiraCLOWideTile", key = context) {
+                textFeedbackContentViewModelFactory.create(context)
+            }
+        val scope = rememberCoroutineScope()
+        val bounceable = remember(tile) { BounceableTileViewModel() }
+        Element(tile.spec.toElementKey(), modifier) {
+            Tile(
+                tile = tile,
+                iconOnly = false,
+                squishiness = { 1f },
+                tileHapticsViewModelFactory = tileHapticsViewModelFactory,
+                coroutineScope = scope,
+                bounceableInfo =
+                    BounceableInfo(
+                        bounceable = bounceable,
+                        previousTile = null,
+                        nextTile = null,
+                        bounceEnd = false,
+                    ),
+                detailsViewModel = detailsViewModel,
+                isVisible = listening,
+                requestToggleTextFeedback = textFeedbackViewModel::requestShowFeedback,
+                enableRevealEffect = false,
+            )
+        }
     }
 
     @Composable

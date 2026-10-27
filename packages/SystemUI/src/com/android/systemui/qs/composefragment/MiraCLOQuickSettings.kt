@@ -367,6 +367,18 @@ private fun MiraCLOVolumeSlider(
     )
 }
 
+/**
+ * ColorOS-style colour for each sound mode: ring = blue, vibrate = orange, silent = red.
+ * Light panel: coloured bubble with a white icon. Dark panel: white bubble with a coloured icon,
+ * the same pairing the active QS tiles use.
+ */
+private fun miracloRingerColor(mode: Int): Color =
+    when (mode) {
+        AudioManager.RINGER_MODE_NORMAL -> Color(0xFF1677FF)
+        AudioManager.RINGER_MODE_VIBRATE -> Color(0xFFFF8A00)
+        else -> Color(0xFFF2453D)
+    }
+
 @Composable
 private fun MiraCLORingerSwitch(
     audioVolumeInteractor: AudioVolumeInteractor,
@@ -394,6 +406,7 @@ private fun MiraCLORingerSwitch(
     ) {
         modes.forEach { (mode, icon, label) ->
             val selected = ringerMode.value == mode
+            val modeColor = miracloRingerColor(mode)
             Box(
                 modifier = Modifier.weight(1f).fillMaxSize(),
                 contentAlignment = Alignment.Center,
@@ -402,7 +415,13 @@ private fun MiraCLORingerSwitch(
                     modifier =
                         Modifier.size(bubble)
                             .clip(CircleShape)
-                            .background(if (selected) glass.fillOn else Color.Transparent)
+                            .background(
+                                when {
+                                    !selected -> Color.Transparent
+                                    glass.dark -> Color.White
+                                    else -> modeColor
+                                }
+                            )
                             .semantics { contentDescription = label }
                             .pointerInput(mode) {
                                 awaitEachGesture {
@@ -422,9 +441,8 @@ private fun MiraCLORingerSwitch(
                         tint =
                             when {
                                 !selected -> glass.iconOff
-                                mode == AudioManager.RINGER_MODE_NORMAL && glass.dark ->
-                                    Color(0xFFEF4444)
-                                else -> glass.iconOn
+                                glass.dark -> modeColor
+                                else -> Color.White
                             },
                         modifier = Modifier.size(24.dp),
                     )

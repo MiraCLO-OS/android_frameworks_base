@@ -76,6 +76,12 @@ private val MIRACLO_BT_SPECS = listOf("bt", "bluetooth")
 
 private val MiraCLOGap = MiraCLOColorOSGap
 
+/** Sun-icon colour at full brightness (the orange of the 🔆 emoji). */
+private val MiraCLOBrightnessFull = Color(0xFFFF9F0A)
+
+/** Slider position treated as "full" (allows for rounding of the brightness value). */
+private const val MIRACLO_FULL_THRESHOLD = 0.995f
+
 /** Matches the media card's own corner radius (Media.kt clips cards to 32dp). */
 private val MiraCLOMediaShape = RoundedCornerShape(32.dp)
 
@@ -246,6 +252,7 @@ private fun MiraCLOVerticalSlider(
     onChange: (Float) -> Unit,
     onStop: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    fullIconTint: Color? = null,
 ) {
     val view = LocalView.current
     var local by remember { mutableFloatStateOf(fraction) }
@@ -293,7 +300,12 @@ private fun MiraCLOVerticalSlider(
         Icon(
             painter = painterResource(iconRes),
             contentDescription = null,
-            tint = if (local > 0.18f) iconTint else glass.iconOff,
+            tint =
+                when {
+                    fullIconTint != null && local >= MIRACLO_FULL_THRESHOLD -> fullIconTint
+                    local > 0.18f -> iconTint
+                    else -> glass.iconOff
+                },
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp).size(26.dp),
         )
     }
@@ -318,6 +330,8 @@ private fun MiraCLOBrightnessSlider(
         fraction = fraction,
         iconRes = BrightnessSliderViewModel.getIconForPercentage(fraction * 100f),
         iconTint = Color(0xFF1A1A1A),
+        // At full brightness only the sun icon turns orange, like the 🔆 emoji.
+        fullIconTint = MiraCLOBrightnessFull,
         label = "Brightness",
         glass = glass,
         onChange = { f -> scope.launch { viewModel.onDrag(Drag.Dragging(toGamma(f))) } },

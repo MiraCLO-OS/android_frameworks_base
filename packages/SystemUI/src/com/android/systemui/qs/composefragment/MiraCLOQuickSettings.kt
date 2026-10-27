@@ -205,9 +205,7 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
 /** Colours shared by the MiraCLO glass cards, matching the tile glass in Tile.kt. */
 private data class MiraCLOGlass(
     val fill: Color,
-    val fillOn: Color,
     val iconOff: Color,
-    val iconOn: Color,
     val accent: Color,
     val secondaryText: Color,
     val dark: Boolean,
@@ -220,26 +218,19 @@ private fun miracloGlass(): MiraCLOGlass {
     val accent = Color(0xFF1677FF)
     return MiraCLOGlass(
         fill = if (dark) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.55f),
-        fillOn = if (dark) Color.White else accent,
         iconOff = onSurface,
-        iconOn = if (dark) Color(0xFF1A1A1A) else Color.White,
         accent = accent,
         secondaryText = onSurface.copy(alpha = 0.70f),
         dark = dark,
     )
 }
 
+/** The glass rim. Created once: building a new Brush per frame showed up during QS expansion. */
+private val MiraCLOGlassRim =
+    Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f)))
+
 private fun Modifier.glassSurface(glass: MiraCLOGlass, shape: Shape): Modifier =
-    this.clip(shape)
-        .background(glass.fill, shape)
-        .border(
-            width = 1.dp,
-            brush =
-                Brush.verticalGradient(
-                    listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f))
-                ),
-            shape = shape,
-        )
+    this.clip(shape).background(glass.fill, shape).border(1.dp, MiraCLOGlassRim, shape)
 
 /**
  * A tall pill slider: the white fill rises from the bottom. Dragging is relative to where the

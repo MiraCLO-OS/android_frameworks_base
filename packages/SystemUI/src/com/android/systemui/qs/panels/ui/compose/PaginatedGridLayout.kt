@@ -51,6 +51,9 @@ import com.android.systemui.qs.panels.dagger.PaginatedBaseLayoutType
 import com.android.systemui.qs.panels.ui.compose.Dimensions.FooterHeight
 import com.android.systemui.qs.panels.ui.compose.Dimensions.InterPageSpacing
 import com.android.systemui.qs.panels.ui.compose.toolbar.EditModeButton
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOQsStyle
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOColorOSGridColumns
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOColorOSGridRows
 import com.android.systemui.qs.panels.ui.viewmodel.PaginatedGridViewModel
 import com.android.systemui.qs.panels.ui.viewmodel.TileViewModel
 import com.android.systemui.qs.panels.ui.viewmodel.toolbar.EditModeButtonViewModel
@@ -80,10 +83,19 @@ constructor(
                 delegateGridLayout.viewModelFactory.create()
             }
 
-        val rows = integerResource(R.integer.quick_settings_paginated_grid_num_rows)
+        // MiraCLO: the ColorOS style shows every grid tile as a 1-column round tile, so pages
+        // are plain chunks of rows x columns, with fewer rows so the panel never needs to scroll.
+        val miracloStyle = LocalMiraCLOQsStyle.current
+        val rows =
+            if (miracloStyle) MiraCLOColorOSGridRows
+            else integerResource(R.integer.quick_settings_paginated_grid_num_rows)
         val pages =
-            remember(tiles, rows, *delegateGridViewModel.pageKeys) {
-                delegateGridViewModel.splitIntoPages(tiles, rows)
+            remember(tiles, rows, miracloStyle, *delegateGridViewModel.pageKeys) {
+                if (miracloStyle) {
+                    tiles.chunked(rows * MiraCLOColorOSGridColumns)
+                } else {
+                    delegateGridViewModel.splitIntoPages(tiles, rows)
+                }
             }
 
         val pagerState = rememberPagerState(0) { pages.size }

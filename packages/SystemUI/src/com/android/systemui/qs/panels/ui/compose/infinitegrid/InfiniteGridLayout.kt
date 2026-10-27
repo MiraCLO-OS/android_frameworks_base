@@ -64,6 +64,13 @@ import kotlinx.coroutines.launch
 /** MiraCLO: gap between tiles and rows in the ColorOS Quick Settings style (ColorOS 17). */
 val MiraCLOColorOSGap = 16.dp
 
+/**
+ * MiraCLO: round tiles per page in the ColorOS Quick Settings style. Fewer rows than stock so the
+ * whole panel fits without vertical scrolling; extra tiles go to the next page (swipe sideways).
+ */
+const val MiraCLOColorOSGridRows = 3
+const val MiraCLOColorOSGridColumns = 4
+
 @SysUISingleton
 class InfiniteGridLayout
 @Inject

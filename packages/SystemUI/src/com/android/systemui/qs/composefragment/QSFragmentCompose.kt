@@ -329,11 +329,15 @@ constructor(
         val canScrollQs =
             object : CanScrollQs {
                 override fun forward(): Boolean {
+                    // MiraCLO: the ColorOS layout pages sideways and never scrolls vertically,
+                    // so a swipe up always reaches the shade and collapses QS.
+                    if (miracloQsStyle) return isCustomizing
                     return (scrollState.canScrollForward && viewModel.isQsFullyExpanded) ||
                         isCustomizing
                 }
 
                 override fun backward(): Boolean {
+                    if (miracloQsStyle) return isCustomizing
                     return (scrollState.canScrollBackward && viewModel.isQsFullyExpanded) ||
                         isCustomizing
                 }
@@ -422,7 +426,12 @@ constructor(
                 transitions =
                     transitions {
                         from(QuickQuickSettings, QuickSettings) {
-                            quickQuickSettingsToQuickSettings(viewModel::animateTilesExpansion::get)
+                            // MiraCLO: the ColorOS layout puts tiles in different places and
+                            // shapes than QQS, so morphing each tile across makes them fly over
+                            // each other. There, QQS fades out and the panel fades/slides in.
+                            quickQuickSettingsToQuickSettings {
+                                viewModel.animateTilesExpansion && !miracloQsStyle
+                            }
                         }
                         to(SceneKeys.EditMode) {
                             spec = tween(durationMillis = EDIT_MODE_TIME_MILLIS)
@@ -931,7 +940,7 @@ constructor(
                                     )
                                 }
                                 .onSizeChanged { viewModel.qsScrollHeight = it.height }
-                                .verticalScroll(scrollState)
+                                .verticalScroll(scrollState, enabled = !miracloQsStyle)
                                 .padding(bottom = 8.dp)
                                 .sysuiResTag(ResIdTags.qsScroll)
                     ) {
@@ -944,7 +953,13 @@ constructor(
                             }
                         }
                         Spacer(
-                            modifier = Modifier.height { qqsPadding + qsExtraPadding.roundToPx() }
+                            modifier =
+                                Modifier.height {
+                                    // MiraCLO: the ColorOS layout starts right under the header,
+                                    // leaving room for the tile pages below.
+                                    qqsPadding +
+                                        if (miracloQsStyle) 0 else qsExtraPadding.roundToPx()
+                                }
                         )
                         // When always compose is false, this will always be true, and
                         // we'll be listening whenever this is composed. When always

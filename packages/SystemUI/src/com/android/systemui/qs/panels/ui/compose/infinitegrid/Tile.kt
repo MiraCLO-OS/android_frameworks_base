@@ -134,6 +134,10 @@ internal val LocalUseCircularQsTileShapes = compositionLocalOf { false }
 /** MiraCLO: ColorOS-style Quick Settings (glass tiles, round icon tiles with labels below). */
 internal val LocalMiraCLOQsStyle = compositionLocalOf { false }
 
+/** Glass rim of MiraCLO tiles. Created once instead of on every frame of the QS animation. */
+private val MiraCLOTileRim =
+    Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f)))
+
 private val MiraCLOBlue = Color(0xFF1677FF)
 private val MiraCLOGreen = Color(0xFF16A34A)
 private val MIRACLO_DATA_TILES = setOf("cell", "mobile_data", "mobiledata")
@@ -267,17 +271,7 @@ fun ContentScope.Tile(
                         }
                         .then(surfaceRevealModifier)
                         .thenIf(miracloStyle) {
-                            Modifier.border(
-                                width = 1.dp,
-                                brush =
-                                    Brush.verticalGradient(
-                                        listOf(
-                                            Color.White.copy(alpha = 0.28f),
-                                            Color.White.copy(alpha = 0.04f),
-                                        )
-                                    ),
-                                shape = tileShape,
-                            )
+                            Modifier.border(width = 1.dp, brush = MiraCLOTileRim, shape = tileShape)
                         }
                         .borderOnFocus(
                             color = MaterialTheme.colorScheme.secondary,

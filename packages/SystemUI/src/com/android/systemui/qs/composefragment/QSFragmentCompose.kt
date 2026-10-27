@@ -154,6 +154,7 @@ import com.android.systemui.qs.panels.shared.model.QSFragmentComposeClippingTabl
 import com.android.systemui.qs.panels.ui.compose.EditMode
 import com.android.systemui.qs.panels.ui.compose.QuickQuickSettings
 import com.android.systemui.qs.panels.ui.compose.TileGrid
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOQsStyle
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalUseCircularQsTileShapes
 import com.android.systemui.qs.shared.ui.QuickSettings.Elements
 import com.android.systemui.qs.ui.composable.QuickSettingsShade
@@ -217,6 +218,7 @@ constructor(
     private var roundBrightnessSlider by mutableStateOf(false)
     private var showAutoBrightnessButton by mutableStateOf(true)
     private var useCircularQsTileShapes by mutableStateOf(false)
+    private var miracloQsStyle by mutableStateOf(false)
     private lateinit var settingsResolver: ContentResolver
     private lateinit var settingsObserver: ContentObserver
     private val userChangedCallback = object : UserTracker.Callback {
@@ -239,7 +241,8 @@ constructor(
                     Settings.System.QS_BRIGHTNESS_POSITION_BOTTOM,
                     Settings.System.QS_BRIGHTNESS_SLIDER_ROUND,
                     Settings.Secure.QS_SHOW_AUTO_BRIGHTNESS,
-                    Settings.System.QS_TILES_CIRCULAR -> readQsSettings()
+                    Settings.System.QS_TILES_CIRCULAR,
+                    MIRACLO_QS_STYLE -> readQsSettings()
                 }
             }
         }
@@ -257,6 +260,9 @@ constructor(
             settingsObserver, UserHandle.USER_ALL)
         settingsResolver.registerContentObserver(
             Settings.System.getUriFor(Settings.System.QS_TILES_CIRCULAR), false,
+            settingsObserver, UserHandle.USER_ALL)
+        settingsResolver.registerContentObserver(
+            Settings.Secure.getUriFor(MIRACLO_QS_STYLE), false,
             settingsObserver, UserHandle.USER_ALL)
         userTracker.addCallback(userChangedCallback) { mainHandler.post(it) }
         readQsSettings()
@@ -284,6 +290,8 @@ constructor(
             userTracker.userId) != 0
         useCircularQsTileShapes = Settings.System.getIntForUser(
             settingsResolver, Settings.System.QS_TILES_CIRCULAR, 0, userTracker.userId) != 0
+        miracloQsStyle = Settings.Secure.getIntForUser(
+            settingsResolver, MIRACLO_QS_STYLE, 0, userTracker.userId) != 0
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -354,6 +362,7 @@ constructor(
         PlatformTheme(isDarkTheme = if (notificationShadeBlur()) isSystemInDarkTheme() else true) {
             CompositionLocalProvider(
                 LocalUseCircularQsTileShapes provides useCircularQsTileShapes,
+                LocalMiraCLOQsStyle provides miracloQsStyle,
             ) {
                 ProvideShortcutHelperIndication(interactionsConfig = interactionsConfig()) {
                     Box(
@@ -1636,3 +1645,6 @@ private fun AlwaysDarkMode(content: @Composable () -> Unit) {
         }
     }
 }
+
+/** MiraCLO: Settings.Secure key for the ColorOS-style Quick Settings layout (0 = off, 1 = on). */
+private const val MIRACLO_QS_STYLE = "miraclo_qs_style"

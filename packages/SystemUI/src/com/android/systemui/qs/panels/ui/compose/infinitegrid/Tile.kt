@@ -36,6 +36,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Arrangement.spacedBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -45,6 +48,7 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.State
@@ -70,7 +74,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.trace
 import com.android.app.tracing.coroutines.launchTraced as launch
 import com.android.compose.animation.Expandable
@@ -120,6 +127,9 @@ private val TileViewModel.traceName
     get() = spec.toString().takeLast(Trace.MAX_SECTION_NAME_LEN)
 
 internal val LocalUseCircularQsTileShapes = compositionLocalOf { false }
+
+/** MiraCLO: ColorOS-style Quick Settings (glass tiles, round icon tiles with labels below). */
+internal val LocalMiraCLOQsStyle = compositionLocalOf { false }
 
 /**
  * This composable function is responsible for rendering a tile based on the provided
@@ -176,7 +186,10 @@ fun ContentScope.Tile(
                 tile.state.collect { value = it.toIconProvider() }
             }
 
-        val colors = TileDefaults.getColorForState(uiState, iconOnly)
+        val miracloStyle = LocalMiraCLOQsStyle.current
+        val colors =
+            if (miracloStyle) TileDefaults.miracloColorsForState(uiState, iconOnly)
+            else TileDefaults.getColorForState(uiState, iconOnly)
         val hapticsViewModel: TileHapticsViewModel =
             rememberViewModel(traceName = "TileHapticsViewModel") {
                 tileHapticsViewModelFactory.create(tile)
@@ -184,7 +197,8 @@ fun ContentScope.Tile(
 
         // TODO(b/361789146): Draw the shapes instead of clipping
         val tileShape by TileDefaults.animateTileShapeAsState(uiState)
-        val circularIconTile = LocalUseCircularQsTileShapes.current && iconOnly
+        val circularIconTile =
+            (LocalUseCircularQsTileShapes.current || miracloStyle) && iconOnly
         val tileHeight = TileHeight
         val animatedColor by animateColorAsState(colors.background, label = "QSTileBackgroundColor")
         val isDualTarget = uiState.handlesToggleClick
@@ -226,7 +240,8 @@ fun ContentScope.Tile(
             text = uiState.label,
             modifier = modifier,
             enabled = Flags.enableQsTileTooltips(),
-        ) { modifier ->
+        ) { tooltipModifier ->
+            val tileBody: @Composable (Modifier) -> Unit = { modifier ->
             TileExpandable(
                 expandable = expandable,
                 color = { animatedColor },
@@ -366,7 +381,45 @@ fun ContentScope.Tile(
                     }
                 }
             }
+            }
+            if (miracloStyle && iconOnly) {
+                MiraCLOLabeledIconTile(
+                    label = uiState.label,
+                    labelColor = colors.label,
+                    modifier = tooltipModifier,
+                ) {
+                    tileBody(Modifier)
+                }
+            } else {
+                tileBody(tooltipModifier)
+            }
         }
+    }
+}
+
+/** MiraCLO: a round icon tile with its label underneath, as in the ColorOS layout. */
+@Composable
+private fun MiraCLOLabeledIconTile(
+    label: String,
+    labelColor: Color,
+    modifier: Modifier = Modifier,
+    tile: @Composable () -> Unit,
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        tile()
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = label,
+            color = labelColor,
+            style = MaterialTheme.typography.labelMedium,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+        )
     }
 }
 
@@ -600,6 +653,38 @@ private object TileDefaults {
         )
     }
 
+    /**
+     * MiraCLO style: translucent "glass" tiles that let the shade blur show through, a white
+     * icon bubble when on (accent-coloured icon), and a faint bubble when off.
+     */
+    @Composable
+    @ReadOnlyComposable
+    fun miracloColorsForState(uiState: TileUiState, iconOnly: Boolean): TileColors {
+        val onSurface = MaterialTheme.colorScheme.onSurface
+        val accent = MaterialTheme.colorScheme.primary
+        val glass = onSurface.copy(alpha = 0.10f)
+        val secondary = onSurface.copy(alpha = 0.70f)
+        return when (uiState.visualState) {
+            STATE_ACTIVE ->
+                TileColors(
+                    background = if (iconOnly) Color.White else glass,
+                    iconBackground = Color.White,
+                    label = onSurface,
+                    secondaryLabel = secondary,
+                    icon = accent,
+                )
+            STATE_INACTIVE ->
+                TileColors(
+                    background = glass,
+                    iconBackground = onSurface.copy(alpha = 0.10f),
+                    label = onSurface,
+                    secondaryLabel = secondary,
+                    icon = onSurface,
+                )
+            else -> unavailableTileColors()
+        }
+    }
+
     @Composable
     @ReadOnlyComposable
     fun getColorForState(uiState: TileUiState, iconOnly: Boolean): TileColors {
@@ -626,7 +711,9 @@ private object TileDefaults {
 
     @Composable
     fun iconRadius(uiState: TileUiState): Dp {
-        if (LocalUseCircularQsTileShapes.current) return ToggleTargetSize / 2
+        if (LocalUseCircularQsTileShapes.current || LocalMiraCLOQsStyle.current) {
+            return ToggleTargetSize / 2
+        }
         return when (uiState.visualState) {
             STATE_ACTIVE -> ActiveIconCornerRadius
             STATE_INACTIVE -> InactiveIconCornerRadius
@@ -636,7 +723,9 @@ private object TileDefaults {
 
     @Composable
     fun tileRadius(uiState: TileUiState): Dp {
-        if (LocalUseCircularQsTileShapes.current) return TileHeight / 2
+        if (LocalUseCircularQsTileShapes.current || LocalMiraCLOQsStyle.current) {
+            return TileHeight / 2
+        }
         return when (uiState.visualState) {
             STATE_ACTIVE -> ActiveTileCornerRadius
             STATE_INACTIVE -> InactiveTileCornerRadius

@@ -21,6 +21,7 @@ import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.graphics.drawable.Animatable
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -29,6 +30,8 @@ import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.Handler
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.UserHandle
 import android.text.TextUtils
 import android.util.TypedValue
@@ -36,18 +39,27 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.VelocityTracker
+import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.ViewOutlineProvider
+import android.view.animation.Interpolator
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.android.internal.policy.SystemBarUtils
 import com.android.settingslib.media.MediaOutputConstants
 import com.android.systemui.media.controls.shared.model.MediaAction
 import com.android.systemui.media.controls.shared.model.MediaData
 import com.android.systemui.res.R
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 
@@ -63,13 +75,42 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         fun openApp(intent: PendingIntent)
 
         fun mainHandler(): Handler
+
+        /** The island was swiped away; hide it until something new plays. */
+        fun dismiss()
     }
 
     private val margin = dp(16)
     private val pillW = dp(186)
     private val pillH = dp(34)
     private val cardRadius = dp(34).toFloat()
+    /** Room under the card for the pull-down wiggle and the ambient glow. */
+    private val bottomRoom = dp(44)
+    /** Room under the pill for dragging it around. */
+    private val pillDragRoom = dp(120)
+    private val vibrator: Vibrator? = context.getSystemService(Vibrator::class.java)
     private val emphasized = PathInterpolator(0.2f, 0f, 0f, 1f)
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private val flingVelocity = dp(900).toFloat()
+    private var dismissing = false
+    private val touchRect = android.graphics.Rect()
+
+    /**
+     * Only the pill (or the card) takes touches; the rest of the window lets them through to
+     * the app below, and a touch there collapses the card (ACTION_OUTSIDE).
+     */
+    private val insetsListener =
+        ViewTreeObserver.OnComputeInternalInsetsListener { info ->
+            val target = if (expanded) card else pill
+            info.setTouchableInsets(ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_REGION)
+            if (target.visibility != VISIBLE) {
+                info.touchableRegion.setEmpty()
+                return@OnComputeInternalInsetsListener
+            }
+            target.getHitRect(touchRect)
+            if (target === pill) touchRect.inset(-dp(6), -dp(6))
+            info.touchableRegion.set(touchRect)
+        }
 
     private var data: MediaData? = null
     private var recents: List<MediaData> = emptyList()
@@ -77,6 +118,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
     private var accent = DEFAULT_ACCENT
     private var artColor = DEFAULT_ACCENT
     private var mediaController: MediaController? = null
+    private var playButtonPlaying: Boolean? = null
+    private var durationMs = 0L
 
     private val aura = AuraView(context)
     private val pill = PillView(context)
@@ -114,38 +157,51 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         addView(
             pill,
             LayoutParams(pillW, pillH, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
-                setMargins(margin, margin, margin, margin)
+                // Room below so the pill can be pulled around; only the pill takes touches.
+                setMargins(0, pillTop(), 0, pillDragRoom)
             },
         )
         addView(
             card,
             LayoutParams(cardWidth(), LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                .apply { setMargins(margin, margin, margin, margin) },
+                .apply { setMargins(0, pillTop(), 0, bottomRoom) },
         )
         buildCard()
 
-        pill.setOnClickListener { setExpanded(true) }
-        pill.setOnLongClickListener {
-            data?.clickIntent?.let { host.openApp(it) }
-            true
-        }
-        pill.contentDescription = "Now playing. Tap to expand"
+        pill.contentDescription = "Now playing. Tap to expand, swipe sideways to hide"
 
         aura.visibility = GONE
         card.visibility = GONE
     }
 
-    /** Top offset of the window so the pill sits centred on the front camera. */
-    fun windowTopOffset(): Int {
-        val cutout = context.display?.cutout?.boundingRectTop
-        val centerY =
-            if (cutout != null && !cutout.isEmpty) cutout.centerY() else pillH / 2 + dp(6)
-        return max(0, centerY - pillH / 2 - margin)
+    /**
+     * Top of the pill, so that it is centred on the status bar icons (the same line as the clock
+     * and battery), around the front camera.
+     */
+    private fun pillTop(): Int {
+        val barHeight = SystemBarUtils.getStatusBarHeight(context)
+        val padTop = resources.getDimensionPixelSize(R.dimen.status_bar_padding_top)
+        val centerY = (barHeight + padTop) / 2
+        return max(0, centerY - pillH / 2)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        viewTreeObserver.addOnComputeInternalInsetsListener(insetsListener)
+    }
+
+    override fun onDetachedFromWindow() {
+        viewTreeObserver.removeOnComputeInternalInsetsListener(insetsListener)
+        super.onDetachedFromWindow()
     }
 
     fun onHostConfigurationChanged() {
-        (card.layoutParams as LayoutParams).width = cardWidth()
-        card.requestLayout()
+        (card.layoutParams as LayoutParams).apply {
+            width = cardWidth()
+            topMargin = pillTop()
+        }
+        (pill.layoutParams as LayoutParams).topMargin = pillTop()
+        requestLayout()
     }
 
     fun bind(data: MediaData, recents: List<MediaData>) {
@@ -175,8 +231,17 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
         bindAction(prevButton, data.semanticActions?.prevOrCustom, "Previous")
         bindAction(nextButton, data.semanticActions?.nextOrCustom, "Next")
+        val wasPlaying = playButtonPlaying
+        playButtonPlaying = data.isPlaying == true
         bindAction(playButton, data.semanticActions?.playOrPause, "Play or pause")
         playButton.imageTintList = android.content.res.ColorStateList.valueOf(0xFF111111.toInt())
+        // The play / pause icons are animated (play morphs into pause and back) and start on the
+        // opposite shape, so they must be run, like the stock player does. Morph only when the
+        // state changed, otherwise jump straight to the end shape.
+        (playButton.drawable as? Animatable)?.let {
+            it.start()
+            if (wasPlaying == playButtonPlaying) it.stop()
+        }
         val custom = data.semanticActions?.custom0
         bindAction(customButton, custom, "App action")
         customButton.visibility = if (custom?.icon != null) VISIBLE else INVISIBLE
@@ -200,6 +265,22 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         card.stop()
     }
 
+    /** Fly the pill or the card off the side, then hide the island. */
+    private fun dismissTo(view: View, direction: Float) {
+        if (dismissing) return
+        dismissing = true
+        host.mainHandler().removeCallbacks(collapseRunnable)
+        performHapticFeedback(HapticFeedbackConstants.GESTURE_END)
+        aura.animate().alpha(0f).setDuration(200).start()
+        view.animate()
+            .translationX(direction * width.coerceAtLeast(view.width) * 1.1f)
+            .alpha(0f)
+            .setDuration(240)
+            .setInterpolator(emphasized)
+            .withEndAction { host.dismiss() }
+            .start()
+    }
+
     // Expand / collapse ----------------------------------------------------------------------
 
     private fun setExpanded(value: Boolean) {
@@ -215,6 +296,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             card.visibility = VISIBLE
             card.pivotX = cardWidth() / 2f
             card.pivotY = 0f
+            card.translationX = 0f
+            card.translationY = 0f
             card.scaleX = 0.55f
             card.scaleY = 0.3f
             card.alpha = 0f
@@ -230,14 +313,22 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 .setInterpolator(emphasized)
                 .withEndAction {
                     card.visibility = GONE
+                    card.translationX = 0f
+                    card.translationY = 0f
                     aura.visibility = GONE
                     pill.visibility = VISIBLE
+                    pill.translationX = 0f
+                    pill.translationY = 0f
+                    pill.scaleX = 1f
+                    pill.scaleY = 1f
                     pill.alpha = 0f
                     pill.animate().alpha(1f).setDuration(160).start()
                 }
                 .start()
             aura.animate().alpha(0f).setDuration(200).start()
         }
+        // The touchable area changes (pill <-> card).
+        requestLayout()
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
@@ -268,10 +359,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setOnClickListener {
-                    data?.clickIntent?.let { host.openApp(it) }
-                    setExpanded(false)
-                }
             }
         header.addView(art, LinearLayout.LayoutParams(dp(46), dp(46)))
         val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -290,9 +377,10 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         content.addView(header)
 
         // Progress
+        // Tall touch area (the line itself is thin), so the song can be dragged to a position.
         content.addView(
             progress,
-            LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(4)).apply { topMargin = dp(16) },
+            LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(24)).apply { topMargin = dp(6) },
         )
         val times = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         times.addView(elapsed, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
@@ -300,9 +388,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         times.addView(total, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         content.addView(
             times,
-            LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(6)
-            },
+            LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT),
         )
 
         // Controls: output, previous, play/pause, next, app action
@@ -398,6 +484,10 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 ?: d.token?.let { MediaController(context, it) }.also { mediaController = it }
         val state = controller?.playbackState
         val duration = controller?.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+        durationMs = duration
+        progress.seekable =
+            state != null && duration > 0L && (state.actions and PlaybackState.ACTION_SEEK_TO) != 0L
+        if (progress.dragging) return
         if (state == null || duration <= 0L) {
             progress.fraction = 0f
             elapsed.text = ""
@@ -487,6 +577,89 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         return Color.HSVToColor(hsv)
     }
 
+    /**
+     * A spring: overshoots and settles. Lower [damping] = more bounce (0.3 bouncy, 0.6 calm).
+     */
+    private fun spring(damping: Float): Interpolator {
+        val oscillations = 1.6f
+        return Interpolator { t ->
+            if (t >= 1f) 1f
+            else 1f - exp(-t * damping * 14f).toFloat() * cos(t * oscillations * 2f * PI).toFloat()
+        }
+    }
+
+    /** A barely-there tap, for the island snapping back. */
+    private fun subtleTick() {
+        val v = vibrator ?: return
+        if (v.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK)) {
+            v.vibrate(
+                VibrationEffect.startComposition()
+                    .addPrimitive(VibrationEffect.Composition.PRIMITIVE_TICK, 0.15f)
+                    .compose()
+            )
+        } else {
+            performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        }
+    }
+
+    /** Resistance: follows the finger at first, then hardly moves, never past [limit]. */
+    private fun rubber(distance: Float, limit: Float): Float =
+        if (distance <= 0f) 0f else limit * (1f - exp(-distance / (limit * 2.5f)))
+
+    /** Tracks one touch and decides whether it is a tap, a sideways swipe, or an up / down pull. */
+    private inner class Gesture {
+        var mode = NONE
+        var tracking = false
+        var cancelled = false
+        var dx = 0f
+        var dy = 0f
+        var vx = 0f
+        var vy = 0f
+        private var downX = 0f
+        private var downY = 0f
+        private var velocity: VelocityTracker? = null
+
+        fun track(ev: MotionEvent) {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    mode = NONE
+                    tracking = true
+                    cancelled = false
+                    downX = ev.rawX
+                    downY = ev.rawY
+                    dx = 0f
+                    dy = 0f
+                    velocity?.recycle()
+                    velocity = VelocityTracker.obtain().also { it.addMovement(ev) }
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    velocity?.addMovement(ev)
+                    dx = ev.rawX - downX
+                    dy = ev.rawY - downY
+                    if (mode == NONE && !cancelled && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                        mode = when {
+                            abs(dx) > abs(dy) -> SIDEWAYS
+                            dy < 0 -> UP
+                            else -> DOWN
+                        }
+                    }
+                }
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> {
+                    velocity?.let {
+                        it.addMovement(ev)
+                        it.computeCurrentVelocity(1000)
+                        vx = it.xVelocity
+                        vy = it.yVelocity
+                        it.recycle()
+                    }
+                    velocity = null
+                    tracking = false
+                }
+            }
+        }
+    }
+
     private fun formatTime(ms: Long): String {
         val total = ms / 1000
         return "%d:%02d".format(total / 60, total % 60)
@@ -500,7 +673,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         var accent = DEFAULT_ACCENT
         var playing = true
         private val body = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val glow = Paint(Paint.ANTI_ALIAS_FLAG)
         private val rim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
         private val bar = Paint(Paint.ANTI_ALIAS_FLAG)
         private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -516,15 +688,112 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 }
             }
 
+        private val gesture = Gesture()
+        private val longPress = Runnable {
+            gesture.cancelled = true
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            data?.clickIntent?.let { host.openApp(it) }
+        }
+
         init {
-            setLayerType(LAYER_TYPE_HARDWARE, null)
             isClickable = true
-            isLongClickable = true
+            // For accessibility (touches are handled in onTouchEvent).
+            setOnClickListener { setExpanded(true) }
+            // Round outline so nothing square is ever drawn around the pill.
+            outlineProvider =
+                object : ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, view.height / 2f)
+                    }
+                }
+            clipToOutline = true
         }
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
             animator.start()
+        }
+
+        /**
+         * Tap: expand. Long press: open the app. Swipe left / right: fly away and hide.
+         * Pull down: a short wiggle, then expand.
+         */
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            if (dismissing) return true
+            gesture.track(ev)
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    animate().cancel()
+                    pivotX = width / 2f
+                    pivotY = height / 2f
+                    // "Picked up": grows a little under the finger.
+                    animate().scaleX(1.06f).scaleY(1.06f).setDuration(220)
+                        .setInterpolator(spring(0.55f)).start()
+                    host.mainHandler().postDelayed(
+                        longPress, ViewConfiguration.getLongPressTimeout().toLong())
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (gesture.mode != NONE) {
+                        host.mainHandler().removeCallbacks(longPress)
+                        animate().cancel()
+                        follow()
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    host.mainHandler().removeCallbacks(longPress)
+                    when {
+                        gesture.cancelled -> settle()
+                        // A quick flick sideways: fly away and hide.
+                        abs(gesture.vx) > flingVelocity * 1.4f &&
+                            abs(gesture.vx) > abs(gesture.vy) * 1.5f ->
+                            dismissTo(this, if (gesture.vx < 0) -1f else 1f)
+                        // Pulled down (mostly straight down): wiggle and expand.
+                        gesture.dy > dp(40) && gesture.dy > abs(gesture.dx) * 1.5f ->
+                            wiggleThenExpand()
+                        gesture.mode == NONE -> {
+                            settle(tick = false)
+                            setExpanded(true)
+                        }
+                        // Anything else: bounce back home.
+                        else -> settle()
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    host.mainHandler().removeCallbacks(longPress)
+                    settle()
+                }
+            }
+            return true
+        }
+
+        /**
+         * The pill follows the finger anywhere on the screen, a little stretched in the direction
+         * it is pulled, with more resistance the further it goes down.
+         */
+        private fun follow() {
+            translationX = gesture.dx * 0.92f
+            translationY =
+                if (gesture.dy >= 0) rubber(gesture.dy, (pillDragRoom - dp(10)).toFloat())
+                else -rubber(-gesture.dy, dp(14).toFloat())
+            val pull = min(1f, (abs(gesture.dx) + abs(gesture.dy)) / dp(240))
+            val horizontal = abs(gesture.dx) >= abs(gesture.dy)
+            scaleX = 1.06f + if (horizontal) 0.08f * pull else -0.04f * pull
+            scaleY = 1.06f + if (horizontal) -0.06f * pull else 0.1f * pull
+        }
+
+        /** Bounce back to the home position. */
+        private fun settle(tick: Boolean = true) {
+            if (tick && (abs(translationX) > dp(4) || abs(translationY) > dp(4))) subtleTick()
+            animate().translationX(0f).translationY(0f).scaleX(1f).scaleY(1f).alpha(1f)
+                .setDuration(520).setInterpolator(spring(0.32f)).start()
+        }
+
+        private fun wiggleThenExpand() {
+            subtleTick()
+            animate().translationX(0f).translationY(0f).scaleX(1f).scaleY(1f)
+                .setDuration(240).setInterpolator(spring(0.3f))
+                .withEndAction { setExpanded(true) }
+                .start()
         }
 
         override fun onDetachedFromWindow() {
@@ -540,10 +809,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             val r = h / 2f
             rect.set(0f, 0f, w, h)
 
-            // Body: glossy black with a soft glow in the music's colour.
-            glow.color = Color.BLACK
-            glow.setShadowLayer(dp(9).toFloat(), 0f, 0f, (accent and 0x00FFFFFF) or 0x59000000)
-            canvas.drawRoundRect(rect, r, r, glow)
+            // Body: glossy black, like the camera cut-out it sits on.
             body.shader = LinearGradient(0f, 0f, 0f, h, 0xFF16171C.toInt(), Color.BLACK, Shader.TileMode.CLAMP)
             canvas.drawRoundRect(rect, r, r, body)
             rim.strokeWidth = dp(1).toFloat() / 2f
@@ -594,6 +860,19 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             setRenderEffect(RenderEffect.createBlurEffect(dp(30).toFloat(), dp(30).toFloat(), Shader.TileMode.DECAL))
         }
 
+        /**
+         * Take no space of its own: the window wraps its content, and a plain View asked to
+         * "match parent" inside that would report the whole screen, making the island window
+         * cover the screen and swallow every touch. The FrameLayout then sizes it to the card.
+         */
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val w = if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.EXACTLY)
+                MeasureSpec.getSize(widthMeasureSpec) else 0
+            val h = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY)
+                MeasureSpec.getSize(heightMeasureSpec) else 0
+            setMeasuredDimension(w, h)
+        }
+
         fun colors(art: Int, accent: Int) {
             c1 = art
             c2 = accent
@@ -603,11 +882,12 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         override fun onDraw(canvas: Canvas) {
             val w = width.toFloat()
             val h = height.toFloat()
+            // Soft: just a hint of the album colours around the card.
             paint.shader = RadialGradient(w * 0.28f, h * 0.35f, w * 0.45f,
-                (c1 and 0x00FFFFFF) or 0x99000000.toInt(), 0, Shader.TileMode.CLAMP)
+                (c1 and 0x00FFFFFF) or 0x4D000000, 0, Shader.TileMode.CLAMP)
             canvas.drawCircle(w * 0.28f, h * 0.35f, w * 0.45f, paint)
             paint.shader = RadialGradient(w * 0.72f, h * 0.7f, w * 0.45f,
-                (c2 and 0x00FFFFFF) or 0x80000000.toInt(), 0, Shader.TileMode.CLAMP)
+                (c2 and 0x00FFFFFF) or 0x40000000, 0, Shader.TileMode.CLAMP)
             canvas.drawCircle(w * 0.72f, h * 0.7f, w * 0.45f, paint)
         }
     }
@@ -672,14 +952,15 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             val h = height.toFloat()
             // Glow under the finger
             if (glowAlpha > 0.01f) {
-                val radius = w * 0.45f
+                // Subtle: a faint light under the finger, never a flash.
+                val radius = w * 0.32f
                 val a = (glowAlpha * 255).toInt().coerceIn(0, 255)
                 touchGlow.shader = RadialGradient(
                     touchX, touchY, radius,
-                    intArrayOf(Color.argb((a * 0.32f).toInt(), 255, 255, 255),
-                        Color.argb((a * 0.45f).toInt(), Color.red(accent), Color.green(accent), Color.blue(accent)),
+                    intArrayOf(Color.argb((a * 0.10f).toInt(), 255, 255, 255),
+                        Color.argb((a * 0.08f).toInt(), Color.red(accent), Color.green(accent), Color.blue(accent)),
                         Color.TRANSPARENT),
-                    floatArrayOf(0f, 0.38f, 1f), Shader.TileMode.CLAMP)
+                    floatArrayOf(0f, 0.4f, 1f), Shader.TileMode.CLAMP)
                 canvas.drawCircle(touchX, touchY, radius, touchGlow)
             }
             // Glass rim
@@ -707,7 +988,81 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             return super.dispatchTouchEvent(ev)
         }
 
-        override fun onTouchEvent(event: MotionEvent): Boolean = true
+        private val gesture = Gesture()
+
+        /** Take over from the buttons once the finger clearly moves (swipe, not a tap). */
+        override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+            if (dismissing) return true
+            gesture.track(ev)
+            return gesture.mode != NONE
+        }
+
+        /**
+         * Swipe left / right: fly away and hide. Swipe up: back to the pill. Pull down: stretches
+         * a little and springs back (does not open the app). Tap on an empty part: open the app.
+         */
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            if (dismissing) return true
+            // Events that reach here directly (empty area) are not yet tracked by intercept.
+            if (ev.actionMasked != MotionEvent.ACTION_DOWN || !gesture.tracking) gesture.track(ev)
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> animate().cancel()
+                MotionEvent.ACTION_MOVE -> applyDrag()
+                MotionEvent.ACTION_UP -> release()
+                MotionEvent.ACTION_CANCEL -> settle()
+            }
+            return true
+        }
+
+        private fun applyDrag() {
+            val w = width.toFloat().coerceAtLeast(1f)
+            when (gesture.mode) {
+                SIDEWAYS -> {
+                    translationX = gesture.dx
+                    alpha = 1f - min(0.8f, abs(gesture.dx) / w)
+                }
+                UP -> {
+                    translationY = gesture.dy
+                    val s = 1f - min(0.25f, -gesture.dy / height * 0.4f)
+                    scaleX = s
+                    scaleY = s
+                }
+                DOWN -> translationY = rubber(gesture.dy, dp(36).toFloat())
+            }
+            aura.translationX = translationX
+            aura.translationY = translationY
+            aura.alpha = alpha
+        }
+
+        private fun release() {
+            when (gesture.mode) {
+                NONE -> {
+                    // A tap where there is no button.
+                    data?.clickIntent?.let { host.openApp(it) }
+                    setExpanded(false)
+                }
+                SIDEWAYS ->
+                    if (abs(gesture.dx) > width * 0.3f || abs(gesture.vx) > flingVelocity) {
+                        dismissTo(this, if (gesture.dx + gesture.vx * 0.05f < 0) -1f else 1f)
+                    } else {
+                        settle()
+                    }
+                UP ->
+                    if (-gesture.dy > dp(48) || gesture.vy < -flingVelocity) setExpanded(false)
+                    else settle()
+                else -> settle()
+            }
+        }
+
+        private fun settle() {
+            val pulledDown = gesture.mode == DOWN
+            if (pulledDown && translationY > dp(4)) subtleTick()
+            animate().translationX(0f).translationY(0f).scaleX(1f).scaleY(1f).alpha(1f)
+                .setDuration(if (pulledDown) 560 else 380)
+                .setInterpolator(spring(if (pulledDown) 0.3f else 0.5f))
+                .start()
+            aura.animate().translationX(0f).translationY(0f).alpha(1f).setDuration(300).start()
+        }
 
         private fun animateGlow(target: Float) {
             glowAnimator?.cancel()
@@ -723,13 +1078,46 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
     }
 
-    /** Thin progress line with a glowing played part. */
+    /** Thin progress line with a glowing played part. Drag it to move through the song. */
     private inner class ProgressLine(context: Context) : View(context) {
         var fraction = 0f
             set(value) {
                 field = value
                 invalidate()
             }
+        var seekable = false
+        var dragging = false
+            private set
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            if (!seekable || durationMs <= 0L) return false
+            val f = (ev.x / width.coerceAtLeast(1)).coerceIn(0f, 1f)
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    dragging = true
+                    performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    preview(f)
+                }
+                MotionEvent.ACTION_MOVE -> preview(f)
+                MotionEvent.ACTION_UP -> {
+                    preview(f)
+                    mediaController?.transportControls?.seekTo((f * durationMs).toLong())
+                    dragging = false
+                    invalidate()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    dragging = false
+                    updateProgress()
+                }
+            }
+            return true
+        }
+
+        private fun preview(f: Float) {
+            fraction = f
+            elapsed.text = formatTime((f * durationMs).toLong())
+        }
         private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x2EFFFFFF }
         private val played = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
@@ -742,16 +1130,22 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
 
         override fun onDraw(canvas: Canvas) {
-            val h = height.toFloat()
+            // The line is drawn in the middle of the (taller) touch area; thicker while dragging.
+            val h = dp(if (dragging) 7 else 4).toFloat()
+            val top = (height - h) / 2f
             val r = h / 2f
-            rect.set(0f, 0f, width.toFloat(), h)
+            rect.set(0f, top, width.toFloat(), top + h)
             canvas.drawRoundRect(rect, r, r, track)
-            rect.set(0f, 0f, width * fraction.coerceIn(0f, 1f), h)
+            rect.set(0f, top, width * fraction.coerceIn(0f, 1f), top + h)
             if (rect.width() > 0f) canvas.drawRoundRect(rect, r, r, played)
         }
     }
 
     companion object {
+        private const val NONE = 0
+        private const val SIDEWAYS = 1
+        private const val UP = 2
+        private const val DOWN = 3
         private val DEFAULT_ACCENT = 0xFF34D399.toInt()
         private const val PROGRESS_INTERVAL_MS = 500L
         private const val AUTO_COLLAPSE_MS = 8000L

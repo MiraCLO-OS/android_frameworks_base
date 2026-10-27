@@ -66,10 +66,14 @@ constructor(
 
     private var view: MiraCLOIslandView? = null
 
+    /** The song that was swiped away; the island stays hidden until something else plays. */
+    private var dismissedKey: String? = null
+
     private val settingsObserver =
         object : ContentObserver(mainHandler) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {
                 readSettings()
+                dismissedKey = null
                 update()
             }
         }
@@ -179,15 +183,23 @@ constructor(
             .distinctBy { it.packageName }
             .take(MAX_RECENTS)
 
+    private fun keyOf(data: MediaData) = "${data.packageName}|${data.song}"
+
     private fun isPortrait() =
         context.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
 
     private fun update() {
         val current = currentSession()
+        // A swiped-away island comes back with the next song, or once the music app has gone
+        // (closed / session ended) and plays again.
+        if (current == null || (dismissedKey != null && dismissedKey != keyOf(current))) {
+            dismissedKey = null
+        }
         val show =
             islandEnabled &&
                 mediaEnabled &&
                 current != null &&
+                dismissedKey == null &&
                 statusBarShowing &&
                 !shadeOpen &&
                 !dozing &&
@@ -212,11 +224,18 @@ constructor(
                     }
 
                     override fun mainHandler(): Handler = mainHandler
+
+                    override fun dismiss() {
+                        dismissedKey = currentSession()?.let { keyOf(it) }
+                        removeWindow()
+                    }
                 },
             )
         val lp =
+            // Full width so a swiped pill / card can slide off the screen edge; only the pill or
+            // the card itself takes touches (see MiraCLOIslandView).
             WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.WRAP_CONTENT,
                     WindowManager.LayoutParams.TYPE_NAVIGATION_BAR_PANEL,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -228,7 +247,7 @@ constructor(
                 )
                 .apply {
                     gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                    y = v.windowTopOffset()
+                    y = 0
                     layoutInDisplayCutoutMode =
                         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                     title = "MiraCLOIsland"

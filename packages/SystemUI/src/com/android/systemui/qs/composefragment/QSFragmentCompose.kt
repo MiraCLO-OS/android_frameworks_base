@@ -1010,9 +1010,10 @@ constructor(
                                             containerViewModel.brightnessSliderViewModel,
                                         audioVolumeInteractor = audioVolumeInteractor,
                                         showMedia = viewModel.qsMediaVisible,
-                                        media = {
+                                        media = { mediaModifier ->
                                             MediaObject(
                                                 mediaHost = viewModel.qsMediaHost,
+                                                modifier = mediaModifier,
                                                 mediaViewModelFactory =
                                                     viewModel.mediaViewModelFactory,
                                                 mediaPresentationStyle =
@@ -1024,7 +1025,9 @@ constructor(
                                                 location =
                                                     com.android.systemui.media.remedia.ui.compose
                                                         .Media.Location.QS,
-                                                expansion = { viewModel.expansionState.progress },
+                                                // Always the 2-row compressed card: the 3-row card
+                                                // does not fit the half-width slot.
+                                                expansion = { 0f },
                                             )
                                         },
                                         listening = isListening,

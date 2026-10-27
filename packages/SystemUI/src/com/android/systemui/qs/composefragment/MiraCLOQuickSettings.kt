@@ -76,6 +76,9 @@ private val MIRACLO_BT_SPECS = listOf("bt", "bluetooth")
 
 private val MiraCLOGap = MiraCLOColorOSGap
 
+/** Matches the media card's own corner radius (Media.kt clips cards to 32dp). */
+private val MiraCLOMediaShape = RoundedCornerShape(32.dp)
+
 /**
  * MiraCLO (ColorOS-style) expanded Quick Settings.
  *
@@ -97,7 +100,7 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
     brightnessViewModel: BrightnessSliderViewModel,
     audioVolumeInteractor: AudioVolumeInteractor,
     showMedia: Boolean,
-    media: @Composable () -> Unit,
+    media: @Composable (Modifier) -> Unit,
     listening: () -> Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -139,11 +142,16 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
                 modifier =
                     Modifier.weight(2f)
                         .fillMaxHeight()
-                        .glassSurface(glass, RoundedCornerShape(28.dp)),
+                        // While media plays, the player card is the whole slot: no glass behind
+                        // it, same corner radius as the card (32dp) so there is a single outline.
+                        .then(
+                            if (showMedia) Modifier.clip(MiraCLOMediaShape)
+                            else Modifier.glassSurface(glass, MiraCLOMediaShape)
+                        ),
                 contentAlignment = Alignment.Center,
             ) {
                 if (showMedia) {
-                    media()
+                    media(Modifier.fillMaxSize())
                 } else {
                     Text(
                         text = "No media playing",

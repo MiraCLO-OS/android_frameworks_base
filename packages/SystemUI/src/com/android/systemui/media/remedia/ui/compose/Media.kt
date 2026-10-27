@@ -180,6 +180,7 @@ import com.android.systemui.media.remedia.ui.viewmodel.MediaPlayPauseActionViewM
 import com.android.systemui.media.remedia.ui.viewmodel.MediaSecondaryActionViewModel
 import com.android.systemui.media.remedia.ui.viewmodel.MediaSettingsButtonViewModel
 import com.android.systemui.media.remedia.ui.viewmodel.MediaViewModel
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOQsStyle
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.verticalSquish
 import com.android.systemui.res.R
 import kotlin.math.abs
@@ -483,7 +484,8 @@ private fun Card(
                             cardIndex = cardIndex,
                             colorScheme = colorScheme,
                             threeRows = false,
-                            fillHeight = false,
+                            // MiraCLO: in the ColorOS QS style the card fills its square slot.
+                            fillHeight = LocalMiraCLOQsStyle.current,
                         )
                     }
 

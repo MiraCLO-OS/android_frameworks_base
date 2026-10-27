@@ -953,13 +953,7 @@ constructor(
                             }
                         }
                         Spacer(
-                            modifier =
-                                Modifier.height {
-                                    // MiraCLO: the ColorOS layout starts right under the header,
-                                    // leaving room for the tile pages below.
-                                    qqsPadding +
-                                        if (miracloQsStyle) 0 else qsExtraPadding.roundToPx()
-                                }
+                            modifier = Modifier.height { qqsPadding + qsExtraPadding.roundToPx() }
                         )
                         // When always compose is false, this will always be true, and
                         // we'll be listening whenever this is composed. When always

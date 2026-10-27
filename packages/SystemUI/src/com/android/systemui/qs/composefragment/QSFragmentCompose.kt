@@ -225,6 +225,14 @@ constructor(
     private var useCircularQsTileShapes by mutableStateOf(false)
     private var miracloQsStyle by mutableStateOf(false)
 
+    /**
+     * MiraCLO: the portrait ColorOS layout always fits, so QS never scrolls and a swipe up always
+     * collapses it. In landscape the panel is too short, so it scrolls like stock.
+     */
+    private fun miracloNoVerticalScroll(): Boolean =
+        miracloQsStyle &&
+            context?.resources?.configuration?.orientation != Configuration.ORIENTATION_LANDSCAPE
+
     private lateinit var settingsResolver: ContentResolver
     private lateinit var settingsObserver: ContentObserver
     private val userChangedCallback = object : UserTracker.Callback {
@@ -333,13 +341,13 @@ constructor(
                 override fun forward(): Boolean {
                     // MiraCLO: the ColorOS layout pages sideways and never scrolls vertically,
                     // so a swipe up always reaches the shade and collapses QS.
-                    if (miracloQsStyle) return isCustomizing
+                    if (miracloNoVerticalScroll()) return isCustomizing
                     return (scrollState.canScrollForward && viewModel.isQsFullyExpanded) ||
                         isCustomizing
                 }
 
                 override fun backward(): Boolean {
-                    if (miracloQsStyle) return isCustomizing
+                    if (miracloNoVerticalScroll()) return isCustomizing
                     return (scrollState.canScrollBackward && viewModel.isQsFullyExpanded) ||
                         isCustomizing
                 }
@@ -942,7 +950,15 @@ constructor(
                                     )
                                 }
                                 .onSizeChanged { viewModel.qsScrollHeight = it.height }
-                                .verticalScroll(scrollState, enabled = !miracloQsStyle)
+                                .verticalScroll(
+                                    scrollState,
+                                    // MiraCLO: portrait ColorOS layout fits the screen and must
+                                    // not scroll; landscape is too short, so it scrolls.
+                                    enabled =
+                                        !miracloQsStyle ||
+                                            LocalConfiguration.current.orientation ==
+                                                Configuration.ORIENTATION_LANDSCAPE,
+                                )
                                 .padding(bottom = 8.dp)
                                 .sysuiResTag(ResIdTags.qsScroll)
                     ) {

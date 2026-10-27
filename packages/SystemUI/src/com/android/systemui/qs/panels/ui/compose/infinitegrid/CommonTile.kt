@@ -474,15 +474,23 @@ object CommonTileDefaults {
         @ReadOnlyComposable
         get() = dimensionResource(id = R.dimen.common_tile_default_start_padding)
 
+    /** MiraCLO: ColorOS style sizes, measured from ColorOS 17. Default style is unchanged. */
+    val MiraCLOColorOSTileHeight = 66.dp
+    val MiraCLOColorOSToggleTargetSize = 46.dp
+
     val TileHeight: Dp
         @Composable
         @ReadOnlyComposable
-        get() = dimensionResource(id = R.dimen.common_tile_default_tile_height)
+        get() =
+            if (LocalMiraCLOQsStyle.current) MiraCLOColorOSTileHeight
+            else dimensionResource(id = R.dimen.common_tile_default_tile_height)
 
     val ToggleTargetSize: Dp
         @Composable
         @ReadOnlyComposable
-        get() = dimensionResource(id = R.dimen.common_tile_default_toggle_target_size)
+        get() =
+            if (LocalMiraCLOQsStyle.current) MiraCLOColorOSToggleTargetSize
+            else dimensionResource(id = R.dimen.common_tile_default_toggle_target_size)
 
     val SideIconWidth = 32.dp
     val SideIconHeight = 20.dp

@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.dimensionResource
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastMap
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.android.compose.animation.scene.ContentScope
@@ -59,6 +60,9 @@ import com.android.systemui.res.R
 import com.android.systemui.shade.shared.flag.DualShadeFlag
 import javax.inject.Inject
 import kotlinx.coroutines.launch
+
+/** MiraCLO: gap between tiles and rows in the ColorOS Quick Settings style (ColorOS 17). */
+val MiraCLOColorOSGap = 16.dp
 
 @SysUISingleton
 class InfiniteGridLayout
@@ -113,8 +117,13 @@ constructor(
         Column(modifier = modifier) {
             VerticalSpannedGrid(
                 columns = columns,
-                columnSpacing = dimensionResource(R.dimen.qs_tile_margin_horizontal),
-                rowSpacing = dimensionResource(R.dimen.qs_tile_margin_vertical),
+                // MiraCLO: ColorOS style uses 16dp gaps; Default style is unchanged.
+                columnSpacing =
+                    if (miracloStyle) MiraCLOColorOSGap
+                    else dimensionResource(R.dimen.qs_tile_margin_horizontal),
+                rowSpacing =
+                    if (miracloStyle) MiraCLOColorOSGap
+                    else dimensionResource(R.dimen.qs_tile_margin_vertical),
                 spans = spans,
                 keys = { sizedTiles[it].tile.spec },
                 modifier = Modifier.fillMaxWidth(),

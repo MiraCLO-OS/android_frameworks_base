@@ -62,7 +62,9 @@ import com.android.systemui.brightness.ui.viewmodel.BrightnessSliderViewModel
 import com.android.systemui.brightness.ui.viewmodel.Drag
 import com.android.systemui.qs.panels.ui.compose.GridLayout
 import com.android.systemui.qs.panels.ui.compose.TileListener
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.InfiniteGridLayout
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOColorOSGap
 import com.android.systemui.qs.panels.ui.viewmodel.TileViewModel
 import com.android.systemui.res.R
 import kotlinx.coroutines.launch
@@ -72,7 +74,7 @@ private val MIRACLO_WIFI_SPECS = listOf("internet", "wifi")
 private val MIRACLO_DATA_SPECS = listOf("cell", "mobile_data", "mobiledata")
 private val MIRACLO_BT_SPECS = listOf("bt", "bluetooth")
 
-private val MiraCLOGap = 12.dp
+private val MiraCLOGap = MiraCLOColorOSGap
 
 /**
  * MiraCLO (ColorOS-style) expanded Quick Settings.
@@ -111,7 +113,8 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
     // The fixed tiles are not part of a grid, so make them listen ourselves.
     TileListener(fixed, listening)
 
-    val tileHeight = dimensionResource(R.dimen.common_tile_default_tile_height)
+    // Follows the ColorOS tile height (66dp) set in CommonTileDefaults for this style.
+    val tileHeight = CommonTileDefaults.TileHeight
     val glass = miracloGlass()
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = spacedBy(MiraCLOGap)) {

@@ -1028,6 +1028,9 @@ constructor(
                                             )
                                         },
                                         listening = isListening,
+                                        // ColorOS 17 uses ~38dp side margins; the stock QS
+                                        // margin already gives ~16dp, so add the rest.
+                                        modifier = Modifier.padding(horizontal = 22.dp),
                                     )
                                 }
                             } else {

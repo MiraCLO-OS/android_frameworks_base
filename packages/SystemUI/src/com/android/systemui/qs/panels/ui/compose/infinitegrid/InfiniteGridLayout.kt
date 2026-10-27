@@ -92,12 +92,17 @@ constructor(
         val columns = viewModel.columnsWithMediaViewModel.columns
         val largeTilesSpan = viewModel.columnsWithMediaViewModel.largeSpan
         val largeTiles by viewModel.iconTilesViewModel.largeTilesState
+        val miracloStyle = LocalMiraCLOQsStyle.current
         // Tiles or largeTiles may be updated while this is composed, so listen to any changes
         val sizedTiles =
-            remember(tiles, largeTiles, largeTilesSpan) {
-                tiles.map {
-                    SizedTileImpl(it, if (largeTiles.contains(it.spec)) largeTilesSpan else 1)
-                }
+            remember(tiles, largeTiles, largeTilesSpan, miracloStyle) {
+                val sized =
+                    tiles.map {
+                        SizedTileImpl(it, if (largeTiles.contains(it.spec)) largeTilesSpan else 1)
+                    }
+                // MiraCLO style: wide tiles first, then the round icon tiles, as in ColorOS.
+                // The order inside each group is kept.
+                if (miracloStyle) sized.sortedBy { if (it.width > 1) 0 else 1 } else sized
             }
         val squishiness by viewModel.squishinessViewModel.squishiness.collectAsStateWithLifecycle()
         val scope = rememberCoroutineScope()

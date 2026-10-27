@@ -28,6 +28,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
@@ -62,7 +63,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -131,6 +134,10 @@ internal val LocalUseCircularQsTileShapes = compositionLocalOf { false }
 /** MiraCLO: ColorOS-style Quick Settings (glass tiles, round icon tiles with labels below). */
 internal val LocalMiraCLOQsStyle = compositionLocalOf { false }
 
+private val MiraCLOBlue = Color(0xFF1677FF)
+private val MiraCLOGreen = Color(0xFF16A34A)
+private val MIRACLO_DATA_TILES = setOf("cell", "mobile_data", "mobiledata")
+
 /**
  * This composable function is responsible for rendering a tile based on the provided
  * [TileViewModel]. It handles different states of the tile (e.g., available, unavailable),
@@ -188,7 +195,7 @@ fun ContentScope.Tile(
 
         val miracloStyle = LocalMiraCLOQsStyle.current
         val colors =
-            if (miracloStyle) TileDefaults.miracloColorsForState(uiState, iconOnly)
+            if (miracloStyle) TileDefaults.miracloColorsForState(uiState, iconOnly, tile.spec.spec)
             else TileDefaults.getColorForState(uiState, iconOnly)
         val hapticsViewModel: TileHapticsViewModel =
             rememberViewModel(traceName = "TileHapticsViewModel") {
@@ -259,6 +266,19 @@ fun ContentScope.Tile(
                                 .aspectRatio(1f)
                         }
                         .then(surfaceRevealModifier)
+                        .thenIf(miracloStyle) {
+                            Modifier.border(
+                                width = 1.dp,
+                                brush =
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color.White.copy(alpha = 0.40f),
+                                            Color.White.copy(alpha = 0.06f),
+                                        )
+                                    ),
+                                shape = tileShape,
+                            )
+                        }
                         .borderOnFocus(
                             color = MaterialTheme.colorScheme.secondary,
                             tileShape.topEnd,
@@ -654,29 +674,36 @@ private object TileDefaults {
     }
 
     /**
-     * MiraCLO style: translucent "glass" tiles that let the shade blur show through, a white
-     * icon bubble when on (accent-coloured icon), and a faint bubble when off.
+     * MiraCLO style, modelled on ColorOS: translucent "glass" tiles that let the shade blur show
+     * through. On a dark panel an active tile shows a white bubble with a coloured icon; on a
+     * light panel the bubble is filled with the colour and the icon is white. Mobile data uses
+     * green, everything else blue.
      */
     @Composable
     @ReadOnlyComposable
-    fun miracloColorsForState(uiState: TileUiState, iconOnly: Boolean): TileColors {
+    fun miracloColorsForState(uiState: TileUiState, iconOnly: Boolean, spec: String): TileColors {
         val onSurface = MaterialTheme.colorScheme.onSurface
-        val accent = MaterialTheme.colorScheme.primary
-        val glass = onSurface.copy(alpha = 0.10f)
+        val darkPanel = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+        val accent = if (spec in MIRACLO_DATA_TILES) MiraCLOGreen else MiraCLOBlue
+        val glass = if (darkPanel) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.55f)
+        val bubbleOff =
+            if (darkPanel) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.06f)
+        val bubbleOn = if (darkPanel) Color.White else accent
+        val iconOn = if (darkPanel) accent else Color.White
         val secondary = onSurface.copy(alpha = 0.70f)
         return when (uiState.visualState) {
             STATE_ACTIVE ->
                 TileColors(
-                    background = if (iconOnly) Color.White else glass,
-                    iconBackground = Color.White,
+                    background = if (iconOnly) bubbleOn else glass,
+                    iconBackground = bubbleOn,
                     label = onSurface,
                     secondaryLabel = secondary,
-                    icon = accent,
+                    icon = iconOn,
                 )
             STATE_INACTIVE ->
                 TileColors(
                     background = glass,
-                    iconBackground = onSurface.copy(alpha = 0.10f),
+                    iconBackground = bubbleOff,
                     label = onSurface,
                     secondaryLabel = secondary,
                     icon = onSurface,

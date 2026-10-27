@@ -180,7 +180,6 @@ import com.android.systemui.media.remedia.ui.viewmodel.MediaPlayPauseActionViewM
 import com.android.systemui.media.remedia.ui.viewmodel.MediaSecondaryActionViewModel
 import com.android.systemui.media.remedia.ui.viewmodel.MediaSettingsButtonViewModel
 import com.android.systemui.media.remedia.ui.viewmodel.MediaViewModel
-import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOQsStyle
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.verticalSquish
 import com.android.systemui.res.R
 import kotlin.math.abs
@@ -484,8 +483,7 @@ private fun Card(
                             cardIndex = cardIndex,
                             colorScheme = colorScheme,
                             threeRows = false,
-                            // MiraCLO: in the ColorOS QS style the card fills its square slot.
-                            fillHeight = LocalMiraCLOQsStyle.current,
+                            fillHeight = false,
                         )
                     }
 
@@ -2003,3 +2001,145 @@ private data class DeviceChipStyle(
     val contentColor: Color,
     val borderColor: Color? = null,
 )
+
+/**
+ * MiraCLO: square media card for the ColorOS-style Quick Settings (half the panel width).
+ *
+ * The stock card layouts are built for the full panel width; squeezed into half of it the play
+ * button covers the title and the seek bar row breaks. This card uses the same view-model and
+ * artwork, laid out like ColorOS: app icon at the top, title and artist, then previous,
+ * play/pause and next in one row. Tapping the card opens the media app.
+ */
+@Composable
+fun MiraCLOMediaCard(
+    viewModelFactory: MediaViewModel.Factory,
+    behavior: MediaUiBehavior,
+    visible: () -> Boolean,
+    location: Media.Location,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val viewModel: MediaViewModel =
+        rememberViewModel("MiraCLOMediaCard.viewModel") {
+            viewModelFactory.create(
+                context = context,
+                carouselVisibility = behavior.carouselVisibility,
+            )
+        }
+    LaunchedEffect(visible) { viewModel.setVisibility(visible) }
+    viewModel.mediaUiEventLogger.logCarouselLocation(location)
+
+    val card = viewModel.cards.getOrNull(viewModel.currentIndex) ?: viewModel.cards.firstOrNull()
+    if (card == null) return
+    val colorScheme = rememberAnimatedColorScheme(card.colorScheme)
+
+    Box(modifier.clip(RoundedCornerShape(32.dp))) {
+        CardBackground(
+            image = card.background,
+            colorScheme = colorScheme,
+            modifier = Modifier.matchParentSize(),
+        )
+        Expandable(
+            controller =
+                rememberExpandableController(color = Color.Transparent, shape = RectangleShape),
+            useModifierBasedImplementation = true,
+            modifier = Modifier.fillMaxSize(),
+        ) { expandable ->
+            Column(
+                modifier =
+                    Modifier.fillMaxSize()
+                        .combinedClickable(
+                            onClick = { card.onClick(expandable) },
+                            onLongClick = card.onLongClick,
+                        )
+                        .semantics { contentDescription = card.contentDescription }
+                        .padding(start = 16.dp, end = 10.dp, top = 14.dp, bottom = 8.dp)
+            ) {
+                Icon(
+                    icon = card.icon,
+                    tint = Color.White,
+                    modifier = Modifier.size(22.dp).clip(CircleShape),
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = card.title,
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+                Text(
+                    text = card.subtitle,
+                    color = Color.White.copy(alpha = 0.72f),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(end = 6.dp),
+                )
+                Row(
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                ) {
+                    SecondaryActionContent(
+                        viewModel = card.navigation.left,
+                        iconColor = Color.White,
+                        resId = MediaRes.EMPTY_STRING,
+                    )
+                    MiraCLOPlayPauseButton(card.playPauseAction)
+                    SecondaryActionContent(
+                        viewModel = card.navigation.right,
+                        iconColor = Color.White,
+                        resId = MediaRes.EMPTY_STRING,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** MiraCLO: plain white play/pause icon (no pill), as in the ColorOS media tile. */
+@Composable
+private fun MiraCLOPlayPauseButton(viewModel: MediaPlayPauseActionViewModel?) {
+    if (viewModel == null) {
+        Spacer(Modifier.size(48.dp))
+        return
+    }
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier =
+            Modifier.size(48.dp)
+                .clip(CircleShape)
+                .clickable(enabled = viewModel.onClick != null) { viewModel.onClick?.invoke() },
+    ) {
+        when (viewModel.state) {
+            is MediaSessionState.Playing,
+            is MediaSessionState.Paused -> {
+                val painterOrNull =
+                    when (viewModel.icon) {
+                        is Icon.Resource ->
+                            rememberAnimatedVectorPainter(
+                                animatedImageVector =
+                                    AnimatedImageVector.animatedVectorResource(
+                                        id = viewModel.icon.resId
+                                    ),
+                                atEnd = viewModel.state == MediaSessionState.Playing,
+                            )
+                        is Icon.Loaded -> rememberDrawablePainter(viewModel.icon.drawable)
+                        null -> null
+                    }
+                painterOrNull?.let { painter ->
+                    Icon(
+                        painter = painter,
+                        contentDescription = viewModel.icon?.contentDescription?.load(),
+                        tint = Color.White,
+                        modifier = Modifier.size(30.dp),
+                    )
+                }
+            }
+            is MediaSessionState.Buffering ->
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+        }
+    }
+}

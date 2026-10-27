@@ -136,6 +136,7 @@ import com.android.systemui.media.controls.ui.view.MediaHost
 import com.android.systemui.media.remedia.shared.flag.MediaControlsInComposeFlag
 import com.android.systemui.media.remedia.ui.compose.Media
 import com.android.systemui.media.remedia.ui.compose.MediaPresentationStyle
+import com.android.systemui.media.remedia.ui.compose.MiraCLOMediaCard
 import com.android.systemui.media.remedia.ui.compose.MediaUiBehavior
 import com.android.systemui.media.remedia.ui.viewmodel.MediaViewModel
 import com.android.systemui.plugins.qs.QS
@@ -1020,24 +1021,39 @@ constructor(
                                         audioVolumeInteractor = audioVolumeInteractor,
                                         showMedia = viewModel.qsMediaVisible,
                                         media = { mediaModifier ->
-                                            MediaObject(
-                                                mediaHost = viewModel.qsMediaHost,
-                                                modifier = mediaModifier,
-                                                mediaViewModelFactory =
-                                                    viewModel.mediaViewModelFactory,
-                                                mediaPresentationStyle =
-                                                    MediaPresentationStyle.Compressed,
-                                                onSwipeToDismiss = viewModel::onMediaSwipeToDismiss,
-                                                behavior = viewModel.qsMediaUiBehavior,
-                                                visible = isListening,
-                                                // Fully qualified: the local `Media` lambda shadows the class here.
-                                                location =
-                                                    com.android.systemui.media.remedia.ui.compose
-                                                        .Media.Location.QS,
-                                                // Always the 2-row compressed card: the 3-row card
-                                                // does not fit the half-width slot.
-                                                expansion = { 0f },
-                                            )
+                                            if (MediaControlsInComposeFlag.isEnabled) {
+                                                // Square ColorOS-style card, same height as the
+                                                // brightness and volume sliders.
+                                                MiraCLOMediaCard(
+                                                    viewModelFactory =
+                                                        viewModel.mediaViewModelFactory,
+                                                    behavior = viewModel.qsMediaUiBehavior,
+                                                    visible = isListening,
+                                                    // Fully qualified: the local `Media` lambda
+                                                    // shadows the class here.
+                                                    location =
+                                                        com.android.systemui.media.remedia.ui
+                                                            .compose.Media.Location.QS,
+                                                    modifier = mediaModifier,
+                                                )
+                                            } else {
+                                                MediaObject(
+                                                    mediaHost = viewModel.qsMediaHost,
+                                                    modifier = mediaModifier,
+                                                    mediaViewModelFactory =
+                                                        viewModel.mediaViewModelFactory,
+                                                    mediaPresentationStyle =
+                                                        MediaPresentationStyle.Compressed,
+                                                    onSwipeToDismiss =
+                                                        viewModel::onMediaSwipeToDismiss,
+                                                    behavior = viewModel.qsMediaUiBehavior,
+                                                    visible = isListening,
+                                                    location =
+                                                        com.android.systemui.media.remedia.ui
+                                                            .compose.Media.Location.QS,
+                                                    expansion = { 0f },
+                                                )
+                                            }
                                         },
                                         listening = isListening,
                                         // ColorOS 17 uses ~38dp side margins; the stock QS

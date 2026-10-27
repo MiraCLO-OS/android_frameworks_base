@@ -224,6 +224,7 @@ constructor(
     private var showAutoBrightnessButton by mutableStateOf(true)
     private var useCircularQsTileShapes by mutableStateOf(false)
     private var miracloQsStyle by mutableStateOf(false)
+
     private lateinit var settingsResolver: ContentResolver
     private lateinit var settingsObserver: ContentObserver
     private val userChangedCallback = object : UserTracker.Callback {
@@ -1021,39 +1022,21 @@ constructor(
                                         audioVolumeInteractor = audioVolumeInteractor,
                                         showMedia = viewModel.qsMediaVisible,
                                         media = { mediaModifier ->
-                                            if (MediaControlsInComposeFlag.isEnabled) {
-                                                // Square ColorOS-style card, same height as the
-                                                // brightness and volume sliders.
-                                                MiraCLOMediaCard(
-                                                    viewModelFactory =
-                                                        viewModel.mediaViewModelFactory,
-                                                    behavior = viewModel.qsMediaUiBehavior,
-                                                    visible = isListening,
-                                                    // Fully qualified: the local `Media` lambda
-                                                    // shadows the class here.
-                                                    location =
-                                                        com.android.systemui.media.remedia.ui
-                                                            .compose.Media.Location.QS,
-                                                    modifier = mediaModifier,
-                                                )
-                                            } else {
-                                                MediaObject(
-                                                    mediaHost = viewModel.qsMediaHost,
-                                                    modifier = mediaModifier,
-                                                    mediaViewModelFactory =
-                                                        viewModel.mediaViewModelFactory,
-                                                    mediaPresentationStyle =
-                                                        MediaPresentationStyle.Compressed,
-                                                    onSwipeToDismiss =
-                                                        viewModel::onMediaSwipeToDismiss,
-                                                    behavior = viewModel.qsMediaUiBehavior,
-                                                    visible = isListening,
-                                                    location =
-                                                        com.android.systemui.media.remedia.ui
-                                                            .compose.Media.Location.QS,
-                                                    expansion = { 0f },
-                                                )
-                                            }
+                                            // Square ColorOS-style card, same height as the
+                                            // brightness and volume sliders. Its view-model is
+                                            // fed by the media pipeline in both the legacy and
+                                            // compose media modes (marble uses legacy).
+                                            MiraCLOMediaCard(
+                                                viewModelFactory = viewModel.mediaViewModelFactory,
+                                                behavior = viewModel.qsMediaUiBehavior,
+                                                visible = isListening,
+                                                // Fully qualified: the local `Media` lambda
+                                                // shadows the class here.
+                                                location =
+                                                    com.android.systemui.media.remedia.ui.compose
+                                                        .Media.Location.QS,
+                                                modifier = mediaModifier,
+                                            )
                                         },
                                         listening = isListening,
                                         // ColorOS 17 uses ~38dp side margins; the stock QS

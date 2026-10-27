@@ -18,6 +18,7 @@ package com.android.systemui.dagger
 
 import com.android.keyguard.KeyguardBiometricLockoutLogger
 import com.android.systemui.CoreStartable
+import com.android.systemui.miraclo.island.MiraCLOIslandController
 import com.android.systemui.LatencyTester
 import com.android.systemui.SliceBroadcastRelayHandler
 import com.android.systemui.accessibility.Magnification
@@ -101,6 +102,12 @@ abstract class SystemUICoreStartableModule {
     @IntoMap
     @ClassKey(InstantAppNotifier::class)
     abstract fun bindInstantAppNotifier(sysui: InstantAppNotifier): CoreStartable
+
+    /** MiraCLO: Dynamic Island (off by default, Settings > Notifications > Dynamic Island). */
+    @Binds
+    @IntoMap
+    @ClassKey(MiraCLOIslandController::class)
+    abstract fun bindMiraCLOIslandController(sysui: MiraCLOIslandController): CoreStartable
 
     /** Inject into KeyboardUI. */
     @Binds

@@ -107,6 +107,7 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
     audioVolumeInteractor: AudioVolumeInteractor,
     showMedia: Boolean,
     media: @Composable (Modifier) -> Unit,
+    mediaHost: @Composable (Modifier) -> Unit = {},
     listening: () -> Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -156,6 +157,7 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
                         ),
                 contentAlignment = Alignment.Center,
             ) {
+                mediaHost(Modifier.matchParentSize())
                 if (showMedia) {
                     media(Modifier.fillMaxSize())
                 } else {

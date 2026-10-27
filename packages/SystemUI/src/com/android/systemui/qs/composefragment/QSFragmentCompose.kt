@@ -132,13 +132,14 @@ import com.android.systemui.keyboard.shortcut.ui.composable.ProvideShortcutHelpe
 import com.android.systemui.lifecycle.repeatWhenAttached
 import com.android.systemui.lifecycle.setSnapshotBinding
 import com.android.systemui.log.table.TableLogBuffer
+import com.android.systemui.media.controls.domain.pipeline.MediaDataManager
 import com.android.systemui.media.controls.ui.view.MediaHost
 import com.android.systemui.media.remedia.shared.flag.MediaControlsInComposeFlag
 import com.android.systemui.media.remedia.ui.compose.Media
 import com.android.systemui.media.remedia.ui.compose.MediaPresentationStyle
-import com.android.systemui.media.remedia.ui.compose.MiraCLOMediaCard
 import com.android.systemui.media.remedia.ui.compose.MediaUiBehavior
 import com.android.systemui.media.remedia.ui.viewmodel.MediaViewModel
+import com.android.systemui.plugins.ActivityStarter
 import com.android.systemui.plugins.qs.QS
 import com.android.systemui.plugins.qs.QSContainerController
 import com.android.systemui.qs.composefragment.SceneKeys.QuickQuickSettings
@@ -200,6 +201,8 @@ constructor(
     private val userTracker: UserTracker,
     private val infiniteGridLayout: InfiniteGridLayout,
     private val audioVolumeInteractor: AudioVolumeInteractor,
+    private val mediaDataManager: MediaDataManager,
+    private val activityStarter: ActivityStarter,
 ) : LifecycleFragment(), QS, Dumpable {
 
     private val scrollListener = MutableStateFlow<QS.ScrollListener?>(null)
@@ -224,6 +227,9 @@ constructor(
     private var showAutoBrightnessButton by mutableStateOf(true)
     private var useCircularQsTileShapes by mutableStateOf(false)
     private var miracloQsStyle by mutableStateOf(false)
+
+    /** MiraCLO: media sessions for the ColorOS-style QS media card. */
+    private val miracloMediaSessions = MiraCLOMediaSessions()
 
     /**
      * MiraCLO: the portrait ColorOS layout always fits, so QS never scrolls and a swipe up always
@@ -315,6 +321,12 @@ constructor(
 
         setListenerCollections()
         lifecycleScope.launch { viewModel.activate() }
+        mediaDataManager.addListener(miracloMediaSessions)
+    }
+
+    override fun onDestroy() {
+        mediaDataManager.removeListener(miracloMediaSessions)
+        super.onDestroy()
     }
 
     override fun onCreateView(
@@ -1036,23 +1048,49 @@ constructor(
                                         brightnessViewModel =
                                             containerViewModel.brightnessSliderViewModel,
                                         audioVolumeInteractor = audioVolumeInteractor,
-                                        showMedia = viewModel.qsMediaVisible,
+                                        showMedia =
+                                            viewModel.qsMediaVisible &&
+                                                miracloMediaSessions.current != null,
+                                        mediaHost = { hostModifier ->
+                                            // The stock QS media host stays in the slot, hidden
+                                            // under the MiraCLO card, so the stock media
+                                            // animation from QQS lands here instead of flying
+                                            // off to the top of the screen.
+                                            if (viewModel.qsMediaVisible) {
+                                                MediaObject(
+                                                    mediaHost = viewModel.qsMediaHost,
+                                                    modifier =
+                                                        hostModifier.graphicsLayer { alpha = 0f },
+                                                    mediaViewModelFactory =
+                                                        viewModel.mediaViewModelFactory,
+                                                    mediaPresentationStyle =
+                                                        MediaPresentationStyle.Compressed,
+                                                    onSwipeToDismiss =
+                                                        viewModel::onMediaSwipeToDismiss,
+                                                    behavior = viewModel.qsMediaUiBehavior,
+                                                    visible = isListening,
+                                                    // Fully qualified: the local `Media` lambda
+                                                    // shadows the class here.
+                                                    location =
+                                                        com.android.systemui.media.remedia.ui
+                                                            .compose.Media.Location.QS,
+                                                    expansion = { 0f },
+                                                )
+                                            }
+                                        },
                                         media = { mediaModifier ->
-                                            // Square ColorOS-style card, same height as the
-                                            // brightness and volume sliders. Its view-model is
-                                            // fed by the media pipeline in both the legacy and
-                                            // compose media modes (marble uses legacy).
-                                            MiraCLOMediaCard(
-                                                viewModelFactory = viewModel.mediaViewModelFactory,
-                                                behavior = viewModel.qsMediaUiBehavior,
-                                                visible = isListening,
-                                                // Fully qualified: the local `Media` lambda
-                                                // shadows the class here.
-                                                location =
-                                                    com.android.systemui.media.remedia.ui.compose
-                                                        .Media.Location.QS,
-                                                modifier = mediaModifier,
-                                            )
+                                            miracloMediaSessions.current?.let { data ->
+                                                MiraCLOMediaCard(
+                                                    data = data,
+                                                    onOpen = { intent ->
+                                                        activityStarter
+                                                            .postStartActivityDismissingKeyguard(
+                                                                intent
+                                                            )
+                                                    },
+                                                    modifier = mediaModifier,
+                                                )
+                                            }
                                         },
                                         listening = isListening,
                                         // ColorOS 17 uses ~38dp side margins; the stock QS

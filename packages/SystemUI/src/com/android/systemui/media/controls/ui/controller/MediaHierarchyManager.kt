@@ -136,14 +136,6 @@ constructor(
         secureSettings.getUriFor(Settings.Secure.MEDIA_CONTROLS_LOCK_SCREEN)
 
     /**
-     * MiraCLO: whether the ColorOS-style QS layout is on. There the QS slot shows the MiraCLO
-     * media card, so instead of flying the QQS player into that slot (where it overlaps the card
-     * and gets squashed into a square), the player stays where it is and fades out while QS
-     * expands, and fades back in while it collapses.
-     */
-    @Volatile private var miracloQsStyle = false
-
-    /**
      * Whether we "skip" QQS during panel expansion.
      *
      * This means that when expanding the panel we go directly to QS. Also when we are on QS and
@@ -686,21 +678,6 @@ constructor(
             UserHandle.USER_ALL,
         )
 
-        val miracloObserver: ContentObserver =
-            object : ContentObserver(handler) {
-                override fun onChange(selfChange: Boolean, uri: Uri?) {
-                    miracloQsStyle =
-                        secureSettings.getIntForUser(MIRACLO_QS_STYLE, 0, UserHandle.USER_CURRENT) !=
-                            0
-                }
-            }
-        miracloObserver.onChange(false, null)
-        secureSettings.registerContentObserverForUserAsync(
-            MIRACLO_QS_STYLE,
-            miracloObserver,
-            UserHandle.USER_ALL,
-        )
-
         // Listen to the communal UI state. Make sure that communal UI is showing and hub itself
         // is
         // available, ie. not disabled and able to be shown.
@@ -1054,12 +1031,6 @@ constructor(
             } else if (!starthost.visible) {
                 starthost = endHost
             }
-            if (isMiracloQsFade()) {
-                // MiraCLO: stay in QQS and fade out (see miracloQsStyle).
-                targetBounds = Rect(starthost.currentBounds)
-                targetClipping = starthost.currentClipping
-                return
-            }
             val newBounds = endHost.currentBounds
             val previousBounds = starthost.currentBounds
             targetBounds = interpolateBounds(previousBounds, newBounds, progress)
@@ -1090,14 +1061,6 @@ constructor(
         resultBounds.set(left, top, right, bottom)
         return resultBounds
     }
-
-    /** MiraCLO: a finger-guided QQS <-> QS transition in the ColorOS-style QS layout. */
-    private fun isMiracloQsFade(): Boolean =
-        miracloQsStyle &&
-            !inSplitShade &&
-            previousLocation == LOCATION_QQS &&
-            desiredLocation == LOCATION_QS &&
-            isCurrentlyInGuidedTransformation()
 
     /** @return true if this transformation is guided by an external progress like a finger */
     fun isCurrentlyInGuidedTransformation(): Boolean {
@@ -1199,23 +1162,10 @@ constructor(
 
             currentBounds.set(bounds)
             currentClipping = clipBounds
-            val miracloFade = !isCurrentlyFading() && isMiracloQsFade()
-            carouselAlpha =
-                when {
-                    isCurrentlyFading() -> alpha
-                    // MiraCLO: gone by the time QS is a third open, back as it closes.
-                    miracloFade -> (1f - getTransformationProgress() * 3f).coerceIn(0f, 1f)
-                    else -> 1.0f
-                }
+            carouselAlpha = if (isCurrentlyFading()) alpha else 1.0f
             val onlyUseEndState = !isCurrentlyInGuidedTransformation() || isCurrentlyFading()
             val startLocation = if (onlyUseEndState) LOCATION_UNKNOWN else previousLocation
-            val progress =
-                when {
-                    onlyUseEndState -> 1.0f
-                    // MiraCLO: keep the QQS layout while it fades in place.
-                    miracloFade -> 0.0f
-                    else -> getTransformationProgress()
-                }
+            val progress = if (onlyUseEndState) 1.0f else getTransformationProgress()
             val endLocation = resolveLocationForFading()
             mediaCarouselController.setCurrentState(
                 startLocation,
@@ -1544,6 +1494,3 @@ private annotation class TransformationType
 )
 @Retention(AnnotationRetention.SOURCE)
 annotation class MediaLocation
-
-/** MiraCLO: Settings.Secure key for the ColorOS-style Quick Settings layout (0 = off, 1 = on). */
-private const val MIRACLO_QS_STYLE = "miraclo_qs_style"

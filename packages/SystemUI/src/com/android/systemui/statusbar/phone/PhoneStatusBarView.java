@@ -40,6 +40,7 @@ import androidx.annotation.NonNull;
 
 import com.android.internal.policy.SystemBarUtils;
 import com.android.systemui.Gefingerpoken;
+import com.android.systemui.miraclo.island.IslandStatusBarSpace;
 import com.android.systemui.res.R;
 import com.android.systemui.statusbar.gesture.StatusBarLongPressGestureDetector;
 import com.android.systemui.statusbar.phone.userswitcher.StatusBarUserSwitcherContainer;
@@ -78,6 +79,12 @@ public class PhoneStatusBarView extends FrameLayout {
      * Draw this many pixels into the left/right side of the cutout to optimally use the space
      */
     private int mCutoutSideNudge = 0;
+
+    /** MiraCLO: the Dynamic Island asked for more (or less) room around the camera. */
+    private final Runnable mIslandSpaceListener = () -> {
+        updateCutoutLocation();
+        requestLayout();
+    };
 
     public PhoneStatusBarView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -128,6 +135,7 @@ public class PhoneStatusBarView extends FrameLayout {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        IslandStatusBarSpace.addListener(mIslandSpaceListener);
         if (updateDisplayParameters()) {
             updateLayoutForCutout();
         }
@@ -143,6 +151,7 @@ public class PhoneStatusBarView extends FrameLayout {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+        IslandStatusBarSpace.removeListener(mIslandSpaceListener);
         mDisplayCutout = null;
     }
 
@@ -354,8 +363,20 @@ public class PhoneStatusBarView extends FrameLayout {
             hasCornerCutout = true;
         }
 
+        // MiraCLO: while Dynamic Island pills show, the gap around the camera covers them, so
+        // the clock and battery stay and the icons that would collide go to the overflow dot.
+        final int islandWidth = IslandStatusBarSpace.width();
+
         if (mDisplayCutout == null || mDisplayCutout.isEmpty() || hasCornerCutout) {
-            mCutoutSpace.setVisibility(View.GONE);
+            if (islandWidth <= 0) {
+                mCutoutSpace.setVisibility(View.GONE);
+                return;
+            }
+            mCutoutSpace.setVisibility(View.VISIBLE);
+            LinearLayout.LayoutParams islandLp =
+                    (LinearLayout.LayoutParams) mCutoutSpace.getLayoutParams();
+            islandLp.width = islandWidth;
+            islandLp.height = ViewGroup.LayoutParams.MATCH_PARENT;
             return;
         }
 
@@ -366,7 +387,7 @@ public class PhoneStatusBarView extends FrameLayout {
 
         bounds.left = bounds.left + mCutoutSideNudge;
         bounds.right = bounds.right - mCutoutSideNudge;
-        lp.width = bounds.width();
+        lp.width = Math.max(bounds.width(), islandWidth);
         lp.height = bounds.height();
     }
 

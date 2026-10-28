@@ -63,9 +63,13 @@ import javax.inject.Inject
  *   activity ends.
  * - An activity hides while its app is on screen (picture-in-picture counts as minimised).
  *
- * The whole island hides on the lock screen, while dozing, while the shade is open, while the
- * status bar is hidden (full-screen apps) and in landscape. Off by default; settings are the
- * Settings.Secure keys below.
+ * The whole island fades out (its window stays, so nothing re-grows afterwards) on the lock
+ * screen, while dozing, while the shade opens and while the status bar is hidden (full-screen
+ * apps); it is removed in landscape and once nothing is left to show. Off by default; settings
+ * are the Settings.Secure keys below.
+ *
+ * Music that stays paused for [PAUSED_TIMEOUT_MS] leaves the island, and comes back on play. A
+ * timer that goes off opens its card by itself and folds it back once answered.
  */
 @SysUISingleton
 class MiraCLOIslandController
@@ -93,12 +97,14 @@ constructor(
     private var showTimers = true
     private var hideWhileOpen = true
     private var severalActivities = true
+    private var pausedTimeout = true
     private var config = MiraCLOIslandView.Config()
 
     // Global conditions ---------------------------------------------------------------------------
 
     private var statusBarShowing = true
     private var shadeOpen = false
+    private var shadeFraction = 0f
     private var dozing = false
     private var barState = StatusBarState.SHADE
 
@@ -109,6 +115,10 @@ constructor(
     private var mediaArtKey: String? = null
     private var mediaArt: Bitmap? = null
     private var mediaAccent = DEFAULT_ACCENT
+    /** When the current music was paused (uptime), or 0 while it plays. */
+    private var mediaPausedAt = 0L
+    private var mediaPausedPackage: String? = null
+    private val pausedTimeoutRunnable = Runnable { update() }
 
     /** All live activities by key. */
     private val activities = LinkedHashMap<String, IslandActivity>()
@@ -129,6 +139,10 @@ constructor(
 
     private var view: MiraCLOIslandView? = null
     private val updateRunnable = Runnable { update() }
+    // An app going to the background is still "visible" while its closing animation runs, so the
+    // visible tasks are read again once that has finished.
+    private val foregroundRecheck = Runnable { refreshForeground() }
+    private val foregroundRecheckLate = Runnable { refreshForeground() }
 
     private val settingsObserver =
         object : ContentObserver(mainHandler) {
@@ -141,9 +155,9 @@ constructor(
 
     private val taskStackListener =
         object : TaskStackChangeListener {
-            override fun onTaskStackChanged() = refreshForeground()
+            override fun onTaskStackChanged() = onTasksChanged()
 
-            override fun onActivityUnpinned() = refreshForeground()
+            override fun onActivityUnpinned() = onTasksChanged()
         }
 
     override fun start() {
@@ -184,6 +198,10 @@ constructor(
         )
 
         shadeExpansionStateManager.addExpansionListener { event ->
+            // Every frame of a shade drag: only the fade follows it; the island updates when the
+            // shade starts or stops being open.
+            shadeFraction = event.fraction
+            view?.setShadeFraction(event.fraction)
             val open = event.fraction > 0f
             if (open != shadeOpen) {
                 shadeOpen = open
@@ -232,6 +250,7 @@ constructor(
         showTimers = on(KEY_TIMERS, 1)
         hideWhileOpen = on(KEY_HIDE_WHILE_OPEN, 1)
         severalActivities = on(KEY_SEVERAL, 1)
+        pausedTimeout = on(KEY_PAUSED_TIMEOUT, 1)
         config =
             MiraCLOIslandView.Config(
                 touchGlow = on(KEY_TOUCH_GLOW, 1),
@@ -242,6 +261,14 @@ constructor(
     }
 
     // What is on screen ----------------------------------------------------------------------------
+
+    private fun onTasksChanged() {
+        refreshForeground()
+        mainHandler.removeCallbacks(foregroundRecheck)
+        mainHandler.removeCallbacks(foregroundRecheckLate)
+        mainHandler.postDelayed(foregroundRecheck, FOREGROUND_RECHECK_MS)
+        mainHandler.postDelayed(foregroundRecheckLate, FOREGROUND_RECHECK_LATE_MS)
+    }
 
     /** Reads the visible tasks off the main thread, then updates on the main thread. */
     private fun refreshForeground() {
@@ -302,8 +329,20 @@ constructor(
     private fun refreshMedia() {
         val data = currentSession()
         if (data == null) {
+            mediaPausedAt = 0L
             removeActivity(MEDIA_KEY)
             return
+        }
+        // Paused music leaves after a while (see isShown); playing again brings it back.
+        if (data.isPlaying == true) {
+            mediaPausedAt = 0L
+        } else if (mediaPausedAt == 0L || mediaPausedPackage != data.packageName) {
+            mediaPausedAt = SystemClock.uptimeMillis()
+        }
+        mediaPausedPackage = data.packageName
+        mainHandler.removeCallbacks(pausedTimeoutRunnable)
+        if (mediaPausedAt != 0L) {
+            mainHandler.postAtTime(pausedTimeoutRunnable, mediaPausedAt + PAUSED_TIMEOUT_MS + 50)
         }
         // Decode the art only when the song changes.
         val artKey = "${data.packageName}|${data.song}|${data.artist}|${data.artwork != null}"
@@ -385,7 +424,8 @@ constructor(
     // State ------------------------------------------------------------------------------------------
 
     private fun putActivity(activity: IslandActivity) {
-        val isNew = !activities.containsKey(activity.key)
+        val old = activities[activity.key]
+        val isNew = old == null
         activities[activity.key] = activity
         dismissed[activity.key]?.let { if (it != activity.signature) dismissed.remove(activity.key) }
         if (isNew) {
@@ -394,6 +434,15 @@ constructor(
             // where the user is looking; otherwise the newest becomes the main pill.
             val at = if (cards.isNotEmpty() && order.isNotEmpty()) 1 else 0
             order.add(at, activity.key)
+        }
+        if (activity.alert && old?.alert != true) {
+            // Time's up: open its card on top, and let it be seen even if it was swiped away.
+            dismissed.remove(activity.key)
+            cards.remove(activity.key)
+            cards.add(0, activity.key)
+        } else if (!activity.alert && old?.alert == true) {
+            // Answered (+1:00): fold back into its pill.
+            cards.remove(activity.key)
         }
         update()
     }
@@ -415,12 +464,23 @@ constructor(
                 IslandKind.STOPWATCH -> showTimers
             } &&
             !dismissed.containsKey(a.key) &&
-            !(hideWhileOpen && isOnScreen(a.packageName))
+            !(hideWhileOpen && isOnScreen(a.packageName)) &&
+            !(a.kind == IslandKind.MEDIA && isPausedTooLong())
+
+    private fun isPausedTooLong(): Boolean =
+        pausedTimeout && mediaPausedAt != 0L &&
+            SystemClock.uptimeMillis() - mediaPausedAt >= PAUSED_TIMEOUT_MS
 
     private fun isPortrait() =
         context.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
 
     private fun update() {
+        // Removed only when it cannot show at all; otherwise faded, so it never re-grows.
+        if (!islandEnabled || !isPortrait()) {
+            cards.clear()
+            removeWindow()
+            return
+        }
         val visible =
             order
                 .mapNotNull { activities[it] }
@@ -428,22 +488,18 @@ constructor(
                 .take(if (severalActivities) MAX_VISIBLE else 1)
         cards.retainAll { key -> visible.any { it.key == key } }
 
-        val show =
-            islandEnabled &&
-                visible.isNotEmpty() &&
-                statusBarShowing &&
-                !shadeOpen &&
-                !dozing &&
-                barState == StatusBarState.SHADE &&
-                isPortrait()
-        if (!show) {
-            cards.clear()
-            removeWindow()
-            return
-        }
+        val shown = statusBarShowing && !dozing && barState == StatusBarState.SHADE
+        // Cards fold away while hidden or while the shade comes down over them.
+        if (!shown || shadeOpen) cards.clear()
+
+        if (visible.isEmpty() && view == null) return
         val pills = visible.filter { it.key !in cards }
         val openCards = cards.mapNotNull { key -> visible.firstOrNull { it.key == key } }
+        val fresh = view == null
         val v = view ?: addWindow() ?: return
+        v.setShadeFraction(shadeFraction)
+        // A new window starts as it should be; an existing one fades.
+        v.setShown(shown, animate = !fresh)
         v.render(MiraCLOIslandView.State(pills = pills, cards = openCards))
     }
 
@@ -505,17 +561,28 @@ constructor(
                 } catch (e: PendingIntent.CanceledException) {
                     Log.w(TAG, "Action no longer available", e)
                 }
+                // "Time's up" answered: fold back (Stop then ends it, +1:00 runs on as a pill).
+                if (activities[key]?.alert == true && cards.remove(key)) update()
+            }
+
+            override fun onEmpty() {
+                // Everything has finished leaving: drop the window if nothing came back meanwhile.
+                mainHandler.post {
+                    val v = view ?: return@post
+                    if (v.isEmpty) removeWindow()
+                }
             }
         }
 
     private fun addWindow(): MiraCLOIslandView? {
         val v = MiraCLOIslandView(context, host).also { it.config = config }
         val lp =
-            // Full width so pills and cards can move freely; only the pills and cards themselves
-            // take touches (see MiraCLOIslandView).
+            // Full width and a fixed height that fits the tallest card stack, so opening a card
+            // never resizes the window mid-animation. Only the pills and cards themselves take
+            // touches (see MiraCLOIslandView); everywhere else touches go straight through.
             WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    (context.resources.displayMetrics.heightPixels * WINDOW_HEIGHT_FRACTION).toInt(),
                     WindowManager.LayoutParams.TYPE_NAVIGATION_BAR_PANEL,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                         WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
@@ -531,6 +598,8 @@ constructor(
                         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                     title = "MiraCLOIsland"
                     setFitInsetsTypes(0)
+                    // A system overlay: apps under the see-through part never count as obscured.
+                    setTrustedOverlay()
                 }
         return try {
             windowManager.addView(v, lp)
@@ -584,6 +653,10 @@ constructor(
         private const val MAX_VISIBLE = 3
         private const val MAX_TASKS = 8
         private const val LAUNCH_GRACE_MS = 1500L
+        private const val FOREGROUND_RECHECK_MS = 400L
+        private const val FOREGROUND_RECHECK_LATE_MS = 1000L
+        private const val PAUSED_TIMEOUT_MS = 10 * 60 * 1000L
+        private const val WINDOW_HEIGHT_FRACTION = 0.62f
         private val DEFAULT_ACCENT = 0xFF34D399.toInt()
 
         /** Settings.Secure: 1 = Dynamic Island on (default 0). */
@@ -596,6 +669,7 @@ constructor(
         const val KEY_TOUCH_GLOW = "miraclo_island_touch_glow"
         const val KEY_AMBIENT_GLOW = "miraclo_island_ambient_glow"
         const val KEY_HAPTICS = "miraclo_island_haptics"
+        const val KEY_PAUSED_TIMEOUT = "miraclo_island_paused_timeout"
 
         private val ALL_KEYS =
             listOf(
@@ -608,6 +682,7 @@ constructor(
                 KEY_TOUCH_GLOW,
                 KEY_AMBIENT_GLOW,
                 KEY_HAPTICS,
+                KEY_PAUSED_TIMEOUT,
             )
     }
 }

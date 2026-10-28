@@ -98,6 +98,8 @@ data class IslandActivity(
      * away comes back when this changes.
      */
     val signature: String = key,
+    /** Needs the user now (a timer's "Time's up"): its card opens by itself and it shows red. */
+    val alert: Boolean = false,
 ) {
     val playing: Boolean
         get() = media?.isPlaying == true || clock?.running == true

@@ -38,6 +38,7 @@ import android.os.Vibrator
 import android.text.TextUtils
 import android.util.PathParser
 import android.util.TypedValue
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.VelocityTracker
@@ -45,7 +46,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewOutlineProvider
 import android.view.ViewTreeObserver
-import android.view.animation.Interpolator
 import android.view.animation.PathInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -65,6 +65,7 @@ import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sign
+import kotlin.math.sqrt
 
 /**
  * The Dynamic Island window content.
@@ -101,6 +102,9 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
         /** A card button (pause, lap, end call, ...). */
         fun onAction(key: String, action: IslandAction)
+
+        /** Everything has left and finished animating out: the window may go. */
+        fun onEmpty()
     }
 
     data class Config(
@@ -132,16 +136,15 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
     // Sizes --------------------------------------------------------------------------------------
 
-    private val pillW = dp(186).toFloat()
+    private val pillW = dp(174).toFloat()
     private val pillH = dp(34).toFloat()
     private val bubbleGap = dp(6).toFloat()
-    private val compactH = dp(68)
-    private val compactRadius = dp(26).toFloat()
+    private val compactH = dp(84)
+    private val compactRadius = dp(30).toFloat()
     private val cardRadius = dp(30).toFloat()
     private val cardGap = dp(8).toFloat()
     private val auraMargin = dp(36)
     private val auraHeight = dp(330)
-    private val pillZoneRoom = dp(70)
 
     // Motion -------------------------------------------------------------------------------------
 
@@ -149,11 +152,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
     private val decelerate = PathInterpolator(0.05f, 0.7f, 0.1f, 1f)
     /** Exits. */
     private val standard = PathInterpolator(0.3f, 0f, 0.1f, 1f)
-    /** Pill moves and snap-backs: one small (about 2%) overshoot, never a wobble. */
-    private val softSpring =
-        Interpolator { t ->
-            if (t >= 1f) 1f else 1f - exp(-t * 11f) * cos(t * 1.4f * 2f * PI).toFloat()
-        }
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
     private val flingVelocity = dp(1000).toFloat()
@@ -166,6 +164,30 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
     private var state = State(emptyList(), emptyList())
     private var retargetPending = false
     private var released = false
+
+    /** Island-wide visibility: faded out (not removed) for the shade, full screen, lock screen. */
+    private var shownTarget = true
+    private var shownFactor = 1f
+    private var shadeFraction = 0f
+    private var shownAnimator: ValueAnimator? = null
+
+    /** One frame loop drives every shape's spring. */
+    private var frameScheduled = false
+    private var lastFrameNs = 0L
+    private val frameCallback =
+        Choreographer.FrameCallback { now ->
+            frameScheduled = false
+            if (released) return@FrameCallback
+            val dt =
+                if (lastFrameNs == 0L) 1f / 90f
+                else ((now - lastFrameNs) / 1_000_000_000f).coerceIn(0.001f, 0.034f)
+            lastFrameNs = now
+            var running = false
+            for (item in items.values.toList()) {
+                if (item.springing) running = item.step(dt) or running
+            }
+            if (running) scheduleFrame() else lastFrameNs = 0L
+        }
 
     private val collapseRunnable = Runnable { host.onCollapseAll() }
     private val tickRunnable =
@@ -184,6 +206,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         ViewTreeObserver.OnComputeInternalInsetsListener { info ->
             info.setTouchableInsets(ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_REGION)
             info.touchableRegion.setEmpty()
+            if (effectiveAlpha() < 0.5f) return@OnComputeInternalInsetsListener
             for (item in items.values) {
                 if (item.leaving) continue
                 item.hitRect(touchRect)
@@ -203,7 +226,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
     init {
         clipChildren = false
         clipToPadding = false
-        minimumHeight = pillZoneHeight()
     }
 
     // Geometry -----------------------------------------------------------------------------------
@@ -225,8 +247,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         val cutout = context.display?.cutout?.boundingRectTop
         return if (cutout != null && !cutout.isEmpty) cutout.exactCenterX() else width / 2f
     }
-
-    private fun pillZoneHeight() = (pillTop() + pillH).toInt() + pillZoneRoom
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
@@ -254,7 +274,84 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         released = true
         host.mainHandler().removeCallbacks(collapseRunnable)
         host.mainHandler().removeCallbacks(tickRunnable)
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        frameScheduled = false
+        shownAnimator?.cancel()
         items.values.forEach { it.stop() }
+        IslandStatusBarSpace.request(0)
+    }
+
+    /** True once nothing is shown or animating out. */
+    val isEmpty: Boolean
+        get() = items.isEmpty()
+
+    // Visibility ---------------------------------------------------------------------------------
+
+    /** Fades the whole island in or out (lock screen, full screen, dozing) without rebuilding it. */
+    fun setShown(shown: Boolean, animate: Boolean = true) {
+        if (shown == shownTarget) return
+        shownTarget = shown
+        shownAnimator?.cancel()
+        if (!animate) {
+            shownFactor = if (shown) 1f else 0f
+            applyAlpha()
+            publishStatusBarSpace()
+            return
+        }
+        shownAnimator =
+            ValueAnimator.ofFloat(shownFactor, if (shown) 1f else 0f).apply {
+                duration = if (shown) 220 else 150
+                interpolator = standard
+                addUpdateListener {
+                    shownFactor = it.animatedValue as Float
+                    applyAlpha()
+                }
+                start()
+            }
+        publishStatusBarSpace()
+    }
+
+    /** Follows the notification shade: gone by the time it is a little open. */
+    fun setShadeFraction(fraction: Float) {
+        val f = fraction.coerceIn(0f, 1f)
+        if (f == shadeFraction) return
+        val wasHidden = shadeFraction >= SHADE_HIDE_FRACTION
+        shadeFraction = f
+        applyAlpha()
+        if (wasHidden != (f >= SHADE_HIDE_FRACTION)) publishStatusBarSpace()
+    }
+
+    private fun effectiveAlpha(): Float = shownFactor * (1f - smooth(shadeFraction, 0f, SHADE_HIDE_FRACTION))
+
+    private fun applyAlpha() {
+        val a = effectiveAlpha()
+        if (a == alpha) return
+        val wasTouchable = alpha >= 0.5f
+        alpha = a
+        visibility = if (a <= 0.001f) INVISIBLE else VISIBLE
+        // Touchable region follows (none while faded out).
+        if (wasTouchable != (a >= 0.5f)) requestLayout()
+    }
+
+    /** Tells the status bar how much room the pills need around the camera (see [IslandStatusBarSpace]). */
+    private fun publishStatusBarSpace() {
+        if (released || !shownTarget || shadeFraction >= SHADE_HIDE_FRACTION || width == 0) {
+            IslandStatusBarSpace.request(0)
+            return
+        }
+        val cx = cameraX()
+        var half = 0f
+        for (a in state.pills) {
+            val g = items[a.key]?.takeIf { !it.leaving }?.target ?: continue
+            half = max(half, max(cx - g.x, g.x + g.w - cx))
+        }
+        IslandStatusBarSpace.request(if (half > 0f) (2f * (half + dp(2))).toInt() else 0)
+    }
+
+    private fun scheduleFrame() {
+        if (frameScheduled || released) return
+        frameScheduled = true
+        Choreographer.getInstance().postFrameCallback(frameCallback)
     }
 
     // Rendering ----------------------------------------------------------------------------------
@@ -280,9 +377,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
         exitStyles.keys.retainAll(items.keys)
 
-        // Keep the window tall while any card is (or was just) open, so nothing is ever clipped.
         if (newState.cards.isNotEmpty()) {
-            minimumHeight = max(minimumHeight, (resources.displayMetrics.heightPixels * 0.62f).toInt())
             scheduleAutoCollapse()
         } else {
             host.mainHandler().removeCallbacks(collapseRunnable)
@@ -322,7 +417,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             val r = if (a.kind == IslandKind.MEDIA) cardRadius else compactRadius
             item.role = Role.CARD
             item.translationZ = dp(3) * (state.cards.size - i).toFloat()
-            item.animateTo(Geo(cardLeft, y, cardW, h, r, 1f, 0f))
+            item.animateTo(Geo(cardLeft, y, cardW, h, r, 1f, 0f), CARD_STIFFNESS, CARD_DAMPING)
             y += h + cardGap
         }
         val pillLeft = cameraX() - pillW / 2f
@@ -333,29 +428,29 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             when (i) {
                 0 -> {
                     item.role = Role.MAIN
-                    item.animateTo(Geo(pillLeft, top, pillW, pillH, pillH / 2f, 0f, 0f))
+                    item.animateTo(Geo(pillLeft, top, pillW, pillH, pillH / 2f, 0f, 0f), pillStiffness(item), pillDamping(item))
                 }
                 1 -> {
                     item.role = Role.RIGHT
-                    item.animateTo(Geo(pillLeft + pillW + bubbleGap, top, pillH, pillH, pillH / 2f, 0f, 1f))
+                    item.animateTo(Geo(pillLeft + pillW + bubbleGap, top, pillH, pillH, pillH / 2f, 0f, 1f), pillStiffness(item), pillDamping(item))
                 }
                 else -> {
                     item.role = Role.LEFT
-                    item.animateTo(Geo(pillLeft - bubbleGap - pillH, top, pillH, pillH, pillH / 2f, 0f, 1f))
+                    item.animateTo(Geo(pillLeft - bubbleGap - pillH, top, pillH, pillH, pillH / 2f, 0f, 1f), pillStiffness(item), pillDamping(item))
                 }
             }
         }
+        publishStatusBarSpace()
     }
 
-    /** Called when any shape finishes moving: shrink the window once nothing needs the room. */
+    /** A card folding back into a pill lands without overshoot; pill moves get a soft one. */
+    private fun pillStiffness(item: Item) = if (item.cardness > 0.05f) CARD_STIFFNESS else PILL_STIFFNESS
+
+    private fun pillDamping(item: Item) = if (item.cardness > 0.05f) CARD_DAMPING else PILL_DAMPING
+
+    /** Called when any shape finishes moving or leaving. */
     private fun onItemSettled() {
-        if (state.cards.isEmpty() && items.values.none { it.moving }) {
-            val target = pillZoneHeight()
-            if (minimumHeight != target) {
-                minimumHeight = target
-                requestLayout()
-            }
-        }
+        if (items.isEmpty()) host.onEmpty()
     }
 
     private fun removeItem(item: Item) {
@@ -368,6 +463,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
     private fun scheduleAutoCollapse() {
         host.mainHandler().removeCallbacks(collapseRunnable)
+        // "Time's up" stays open until it is answered.
+        if (state.cards.any { it.alert }) return
         host.mainHandler().postDelayed(collapseRunnable, AUTO_COLLAPSE_MS)
     }
 
@@ -542,18 +639,37 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         var leaving = false
             private set
         var entering = false
+        /** The spring is running. */
+        var springing = false
+            private set
+        /** Still clearly on its way (touches wait); the last few pixels of a landing do not count. */
         val moving: Boolean
-            get() = animator?.isRunning == true
+            get() =
+                exitAnimator?.isRunning == true ||
+                    (springing &&
+                        (abs(pos[0] - tgt[0]) > dp(6) || abs(pos[1] - tgt[1]) > dp(6) ||
+                            abs(pos[2] - tgt[2]) > dp(6) || abs(pos[5] - tgt[5]) > 0.08f))
+        /** Where it is heading. */
+        val target: Geo
+            get() = Geo(tgt[0], tgt[1], tgt[2], tgt[3], tgt[4], tgt[5], tgt[6])
+        /** How much of a card it is right now. */
+        val cardness: Float
+            get() = geo.c
 
         val aura = AuraView(context)
         private val content: CardContent =
             if (kind == IslandKind.MEDIA) MediaContent(context, this) else CompactContent(context, this)
 
         private var geo = Geo(0f, 0f, 1f, 1f, 0f, 0f, 0f)
-        private var animator: ValueAnimator? = null
+        // Spring state, one value per Geo field (x, y, w, h, r, c, b): position, velocity, target.
+        private val pos = FloatArray(7)
+        private val vel = FloatArray(7)
+        private val tgt = FloatArray(7)
+        private var stiffness = CARD_STIFFNESS
+        private var damping = CARD_DAMPING
+        private var exitAnimator: ValueAnimator? = null
         private var dragX = 0f
         private var dragY = 0f
-        private var settleAnimator: ValueAnimator? = null
         private val gesture = Gesture()
         private var ignoreTouch = false
 
@@ -628,8 +744,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
 
         fun stop() {
-            animator?.cancel()
-            settleAnimator?.cancel()
+            springing = false
+            exitAnimator?.cancel()
             glowAnimator?.cancel()
             barAnimator.cancel()
         }
@@ -674,51 +790,99 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         // Geometry
 
         fun jumpTo(g: Geo) {
-            animator?.cancel()
+            springing = false
+            write(g, pos)
+            write(g, tgt)
+            vel.fill(0f)
             geo = g
             apply()
         }
 
-        fun animateTo(target: Geo) {
+        /**
+         * Sends the shape towards [g] on a spring. The current speed is kept, so a retarget in the
+         * middle of a move bends the path instead of restarting it.
+         */
+        fun animateTo(g: Geo, k: Float, zeta: Float) {
             if (leaving) return
-            if (animator?.isRunning != true && geo == target && !entering) return
-            val from = geo
-            val bigMove = from.c > 0.01f || target.c > 0.01f
             val wasEntering = entering
             entering = false
-            animator?.cancel()
-            animator =
-                ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = if (bigMove) 440 else 400
-                    interpolator = if (bigMove) decelerate else softSpring
-                    addUpdateListener {
-                        val t = it.animatedValue as Float
-                        geo = lerpGeo(from, target, t)
-                        if (wasEntering) alpha = smooth(t, 0f, 0.35f)
-                        apply()
-                    }
-                    addListener(
-                        object : AnimatorListenerAdapter() {
-                            override fun onAnimationStart(animation: Animator) {
-                                // Card contents fade as one GPU layer while morphing.
-                                content.view.setLayerType(LAYER_TYPE_HARDWARE, null)
-                            }
+            if (wasEntering) {
+                animate().alpha(1f).setDuration(ENTER_FADE_MS).setInterpolator(standard).start()
+            }
+            if (!springing && !wasEntering && geo == g) return
+            write(g, tgt)
+            stiffness = k
+            damping = zeta
+            startSpring()
+        }
 
-                            override fun onAnimationEnd(animation: Animator) {
-                                content.view.setLayerType(LAYER_TYPE_NONE, null)
-                                if (wasEntering) alpha = 1f
-                                onItemSettled()
-                            }
-                        }
-                    )
-                    start()
+        private fun startSpring() {
+            if (!springing) {
+                springing = true
+                // Card contents fade as one GPU layer while morphing.
+                content.view.setLayerType(LAYER_TYPE_HARDWARE, null)
+            }
+            scheduleFrame()
+        }
+
+        /** Advances the spring by [dt] seconds; returns true while it still moves. */
+        fun step(dt: Float): Boolean {
+            if (!springing) return false
+            val k = stiffness
+            val c = 2f * damping * sqrt(k)
+            var left = dt
+            while (left > 0f) {
+                val h = min(left, SPRING_SUBSTEP)
+                for (i in 0 until 7) {
+                    val a = -k * (pos[i] - tgt[i]) - c * vel[i]
+                    vel[i] += a * h
+                    pos[i] += vel[i] * h
                 }
+                left -= h
+            }
+            var done = true
+            for (i in 0 until 7) {
+                val unit = i >= 5 // c and b are 0..1, the rest are pixels
+                val dx = if (unit) 0.002f else 0.35f
+                val dv = if (unit) 0.03f else 6f
+                if (abs(pos[i] - tgt[i]) > dx || abs(vel[i]) > dv) {
+                    done = false
+                    break
+                }
+            }
+            if (done) {
+                tgt.copyInto(pos)
+                vel.fill(0f)
+            }
+            geo = Geo(
+                pos[0], pos[1], max(1f, pos[2]), max(1f, pos[3]), max(0f, pos[4]),
+                pos[5].coerceIn(0f, 1f), pos[6].coerceIn(0f, 1f),
+            )
+            apply()
+            if (done) {
+                springing = false
+                content.view.setLayerType(LAYER_TYPE_NONE, null)
+                if (alpha < 1f && !leaving) alpha = 1f
+                onItemSettled()
+            }
+            return !done
+        }
+
+        private fun write(g: Geo, out: FloatArray) {
+            out[0] = g.x
+            out[1] = g.y
+            out[2] = g.w
+            out[3] = g.h
+            out[4] = g.r
+            out[5] = g.c
+            out[6] = g.b
         }
 
         fun exit(style: Exit) {
             leaving = true
-            animator?.cancel()
-            settleAnimator?.cancel()
+            springing = false
+            exitAnimator?.cancel()
+            animate().cancel()
             val from = geo
             val camX = cameraX()
             val target =
@@ -733,7 +897,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             val startAlpha = alpha
             val startDragX = dragX
             val startDragY = dragY
-            animator =
+            val startScale = scaleX
+            exitAnimator =
                 ValueAnimator.ofFloat(0f, 1f).apply {
                     duration = if (style == Exit.OPENED) 160 else 300
                     interpolator = standard
@@ -742,6 +907,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                         geo = lerpGeo(from, target, t)
                         dragX = lerp(startDragX, 0f, t)
                         dragY = lerp(startDragY, 0f, t)
+                        scaleX = lerp(startScale, 1f, t)
+                        scaleY = scaleX
                         alpha = startAlpha * (1f - smooth(t, if (style == Exit.ENDED) 0.3f else 0f, 1f))
                         apply()
                     }
@@ -755,7 +922,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
 
         fun finishExitNow() {
-            animator?.end()
+            exitAnimator?.end()
         }
 
         /** Applies the current shape: translation, clip, glass amount, glow. */
@@ -992,7 +1159,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         private fun onMainPillTouch(ev: MotionEvent) {
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    settleAnimator?.cancel()
                     pivotX = geo.w / 2f
                     pivotY = geo.h / 2f
                     animate().scaleX(LIFT).scaleY(LIFT).setDuration(160).setInterpolator(decelerate).start()
@@ -1053,7 +1219,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
         private fun onCardTouch(ev: MotionEvent) {
             when (ev.actionMasked) {
-                MotionEvent.ACTION_DOWN -> settleAnimator?.cancel()
+                MotionEvent.ACTION_DOWN -> {}
                 MotionEvent.ACTION_MOVE ->
                     when (gesture.mode) {
                         SIDEWAYS -> {
@@ -1091,34 +1257,31 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             animate().scaleX(1f).scaleY(1f).setDuration(220).setInterpolator(decelerate).start()
         }
 
-        /** Hands the drag offset over to the shape's own movement. */
+        /**
+         * Hands the drag over to the shape's own spring: the finger offset becomes its position and
+         * (part of) the finger's speed its velocity, so the next move starts exactly here, already
+         * moving the way the finger was.
+         */
         private fun releaseDrag(animated: Boolean) {
-            // Fold the finger offset into the shape so the next move starts exactly here.
-            geo = geo.copy(x = geo.x + dragX, y = geo.y + dragY)
+            pos[0] += dragX
+            pos[1] += dragY
+            vel[0] += (gesture.vx * RELEASE_VELOCITY).coerceIn(-flingVelocity, flingVelocity)
+            vel[1] += (gesture.vy * RELEASE_VELOCITY).coerceIn(-flingVelocity, flingVelocity)
+            geo = geo.copy(x = pos[0], y = pos[1])
             dragX = 0f
             dragY = 0f
             if (!animated) apply()
         }
 
-        /** Back in place with a gentle spring. */
+        /** Back in place with a gentle bounce. */
         private fun settle() {
             unlift()
             if (abs(dragX) > dp(4) || abs(dragY) > dp(4)) subtleTick()
-            val sx = dragX
-            val sy = dragY
-            settleAnimator?.cancel()
-            settleAnimator =
-                ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 420
-                    interpolator = softSpring
-                    addUpdateListener {
-                        val f = it.animatedValue as Float
-                        dragX = lerp(sx, 0f, f)
-                        dragY = lerp(sy, 0f, f)
-                        apply()
-                    }
-                    start()
-                }
+            if (dragX == 0f && dragY == 0f) return
+            releaseDrag(animated = true)
+            stiffness = SNAP_STIFFNESS
+            damping = SNAP_DAMPING
+            startSpring()
         }
 
         private fun animateGlow(target: Float) {
@@ -1218,17 +1381,27 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         private val glyph = GlyphView(context)
         private val avatar = ImageView(context)
         private val initial = text(17f, Color.WHITE, 600)
-        private val big = text(26f, Color.WHITE, 600)
-        private val label = text(12f, 0x99FFFFFF.toInt(), 400)
+        private val big = text(30f, Color.WHITE, 600)
+        private val label = text(13f, 0x99FFFFFF.toInt(), 400)
         private val buttons = LinearLayout(context)
         private var activity: IslandActivity? = null
         private var actionsKey: String? = null
         private var lastBig = ""
+        /** "Time's up": the icon blinks softly. */
+        private val blink =
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 1000
+                repeatCount = ValueAnimator.INFINITE
+                addUpdateListener {
+                    val t = it.animatedValue as Float
+                    glyph.alpha = 1f - 0.55f * (0.5f - 0.5f * cos(t * 2f * PI).toFloat())
+                }
+            }
 
         init {
             row.orientation = LinearLayout.HORIZONTAL
             row.gravity = Gravity.CENTER_VERTICAL
-            row.setPadding(dp(16), 0, dp(12), 0)
+            row.setPadding(dp(20), 0, dp(16), 0)
             row.minimumHeight = compactH
             avatar.scaleType = ImageView.ScaleType.CENTER_CROP
             avatar.outlineProvider = ViewOutlineProvider.BACKGROUND
@@ -1236,19 +1409,32 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             avatar.clipToOutline = true
             initial.gravity = Gravity.CENTER
             lead.addView(glyph, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER))
-            lead.addView(avatar, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
-            lead.addView(initial, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
-            row.addView(lead, LinearLayout.LayoutParams(dp(40), dp(40)))
+            lead.addView(avatar, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
+            lead.addView(initial, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
+            row.addView(lead, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)))
             val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            big.includeFontPadding = false
             texts.addView(big)
-            texts.addView(label)
+            texts.addView(label, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(4)
+            })
             row.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(12)
-                marginEnd = dp(8)
+                marginStart = dp(14)
+                marginEnd = dp(10)
             })
             buttons.orientation = LinearLayout.HORIZONTAL
             buttons.gravity = Gravity.CENTER_VERTICAL
             row.addView(buttons, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, compactH))
+            row.addOnAttachStateChangeListener(
+                object : OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) {
+                        if (activity?.alert == true) blink.start()
+                    }
+
+                    override fun onViewDetachedFromWindow(v: View) = blink.cancel()
+                }
+            )
         }
 
         override fun bind(a: IslandActivity, stacked: Boolean) {
@@ -1261,16 +1447,25 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             initial.visibility = if (isCall && a.art == null) VISIBLE else GONE
             initial.background = circle(0xFF475569.toInt())
             initial.text = a.title.firstOrNull()?.uppercase() ?: ""
+            val paused = a.clock?.running == false
             if (isCall) {
                 big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
                 big.setTextColor(Color.WHITE)
                 big.text = a.title
                 label.setTextColor(a.accent)
             } else {
-                big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
-                big.setTextColor(if (a.kind == IslandKind.TIMER) a.accent else Color.WHITE)
+                big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30f)
+                val color = if (a.kind == IslandKind.TIMER) a.accent else Color.WHITE
+                // A paused time dims.
+                big.setTextColor(if (paused) (color and 0x00FFFFFF) or 0xB3000000.toInt() else color)
                 label.setTextColor(0x99FFFFFF.toInt())
-                label.text = a.title
+                label.text = if (paused && !a.alert) "${a.title} · Paused" else a.title
+            }
+            if (a.alert) {
+                if (!blink.isStarted && row.isAttachedToWindow) blink.start()
+            } else {
+                blink.cancel()
+                glyph.alpha = 1f
             }
             lastBig = ""
             update()
@@ -1278,7 +1473,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
 
         private fun bindButtons(a: IslandActivity) {
-            val k = a.actions.joinToString { "${it.label}|${it.style}|${it.icon != null}" } + "|${a.accent}"
+            val k = a.actions.joinToString { "${it.label}|${it.style}|${it.icon != null}" } + "|${a.accent}|${a.kind}"
             if (k == actionsKey) {
                 // Same buttons: just point them at the new intents.
                 a.actions.forEachIndexed { i, action ->
@@ -1289,15 +1484,16 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             actionsKey = k
             buttons.removeAllViews()
             a.actions.forEachIndexed { i, action ->
-                val b = actionButton(action, a.accent)
+                val b = actionButton(action, a)
                 b.setOnClickListener { item.sendAction(action) }
-                buttons.addView(b, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42)).apply {
-                    if (i > 0) marginStart = dp(8)
+                buttons.addView(b, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46)).apply {
+                    if (i > 0) marginStart = dp(10)
                 })
             }
         }
 
-        private fun actionButton(action: IslandAction, accent: Int): View {
+        private fun actionButton(action: IslandAction, a: IslandActivity): View {
+            val accent = a.accent
             val bg =
                 when (action.style) {
                     IslandAction.Style.PRIMARY -> accent
@@ -1308,12 +1504,16 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             return if (action.style == IslandAction.Style.DANGER || action.icon != null) {
                 ImageButton(context).apply {
                     background = circle(bg)
-                    minimumWidth = dp(42)
+                    minimumWidth = dp(46)
                     scaleType = ImageView.ScaleType.FIT_CENTER
-                    setPadding(dp(11), dp(11), dp(11), dp(11))
-                    if (action.style == IslandAction.Style.DANGER && action.icon == null) {
-                        setImageDrawable(GlyphDrawable(Glyphs.Glyph.END_CALL, fg))
+                    if (action.style == IslandAction.Style.DANGER) {
+                        // Our own shapes: hang up for calls, a stop square for the rest.
+                        val g = if (a.kind == IslandKind.CALL) Glyphs.Glyph.END_CALL else Glyphs.Glyph.STOP
+                        val pad = dp(if (g == Glyphs.Glyph.STOP) 13 else 11)
+                        setPadding(pad, pad, pad, pad)
+                        setImageDrawable(GlyphDrawable(g, Color.WHITE))
                     } else {
+                        setPadding(dp(13), dp(13), dp(13), dp(13))
                         setImageDrawable(action.icon?.mutate())
                         imageTintList = ColorStateList.valueOf(fg)
                     }
@@ -1327,8 +1527,9 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                     typeface = Typeface.create(Typeface.DEFAULT, 600, false)
                     gravity = Gravity.CENTER
                     maxLines = 1
+                    minWidth = dp(46)
                     setPadding(dp(14), 0, dp(14), 0)
-                    background = roundRect(bg, dp(21).toFloat())
+                    background = roundRect(bg, dp(23).toFloat())
                     isClickable = true
                 }
             }
@@ -1681,6 +1882,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             END_CALL(false, "M3 14.5c5-4.6 13-4.6 18 0l-1.8 2.3a1.4 1.4 0 0 1-1.9.3l-2.4-1.6a1.4 1.4 0 0 1-.6-1.2v-1.6a12 12 0 0 0-4.6 0v1.6a1.4 1.4 0 0 1-.6 1.2l-2.4 1.6a1.4 1.4 0 0 1-1.9-.3z"),
             HOURGLASS(true, "M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9"),
             STOPWATCH(true, "M12 5a8 8 0 1 1 0 16a8 8 0 1 1 0-16zM12 13V9M10 2.5h4M18.5 6l1.5-1.5"),
+            STOP(false, "M8 6h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"),
             NOTE(false, "M9 17.5V6l10-2v11.5a2.6 2.6 0 1 1-1.8-2.5V7.6L10.8 8.9v8.6a2.6 2.6 0 1 1-1.8-2.5z"),
         }
 
@@ -1889,6 +2091,23 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         private const val UP = 2
         private const val DOWN = 3
         private const val LIFT = 1.03f
+
+        // Springs (stiffness in 1/s^2, damping ratio: 1 = no overshoot).
+        /** Cards opening, closing and restacking: quick and calm, no overshoot. */
+        private const val CARD_STIFFNESS = 340f
+        private const val CARD_DAMPING = 1f
+        /** Pills moving and swapping: about 1% overshoot. */
+        private const val PILL_STIFFNESS = 400f
+        private const val PILL_DAMPING = 0.82f
+        /** Snap back after a drag that did not go far enough: one soft bounce. */
+        private const val SNAP_STIFFNESS = 520f
+        private const val SNAP_DAMPING = 0.7f
+        /** Share of the finger's speed handed to the shape on release (drags are rubber-banded). */
+        private const val RELEASE_VELOCITY = 0.25f
+        private const val SPRING_SUBSTEP = 0.004f
+        private const val ENTER_FADE_MS = 180L
+        /** The island is gone once the shade is this far open. */
+        private const val SHADE_HIDE_FRACTION = 0.35f
         private const val TICK_MS = 100L
         private const val PROGRESS_INTERVAL_MS = 500L
         private const val AUTO_COLLAPSE_MS = 8000L

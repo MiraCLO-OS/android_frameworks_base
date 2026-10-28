@@ -14,12 +14,19 @@ import android.content.ComponentCallbacks
 import android.content.Context
 import android.content.res.Configuration
 import android.database.ContentObserver
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Handler
 import android.os.SystemClock
 import android.os.UserHandle
 import android.provider.Settings
+import android.service.notification.NotificationListenerService.RankingMap
+import android.service.notification.StatusBarNotification
 import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
@@ -35,6 +42,7 @@ import com.android.systemui.shade.ShadeExpansionStateManager
 import com.android.systemui.shared.system.TaskStackChangeListener
 import com.android.systemui.shared.system.TaskStackChangeListeners
 import com.android.systemui.statusbar.CommandQueue
+import com.android.systemui.statusbar.NotificationListener
 import com.android.systemui.statusbar.StatusBarState
 import java.util.concurrent.Executor
 import javax.inject.Inject
@@ -42,14 +50,22 @@ import javax.inject.Inject
 /**
  * MiraCLO Dynamic Island.
  *
- * A small pill around the front camera that shows what is playing, and expands into a card when
- * tapped. It is off by default and controlled from Settings > Notifications > Dynamic Island
- * (Settings.Secure keys below).
+ * Collects live activities (media, ongoing calls, Clock timer and stopwatch), decides which are
+ * shown and where, and hands that to [MiraCLOIslandView], which draws and animates it.
  *
- * The island is its own overlay window. It shows only while the music app is minimised: it hides
- * while that app is on screen (picture-in-picture counts as minimised), while the status bar is
- * hidden (full-screen apps), while the shade is open (QS has its own player), on the lock screen
- * and while dozing, and in landscape.
+ * Layout rules:
+ * - Up to three activities show at once. [order] is newest first: index 0 is the main pill on the
+ *   camera, 1 the round pill on its right, 2 the round pill on its left. Swiping the main pill
+ *   sideways swaps it with the round pill on that side.
+ * - Tapping a pill opens it as a card under the status bar; cards stack newest-opened on top
+ *   ([cards]); the others stay pills. Tapping outside folds every card back into its pill.
+ * - The main pill closes by swiping it up (until the activity becomes something new), or when the
+ *   activity ends.
+ * - An activity hides while its app is on screen (picture-in-picture counts as minimised).
+ *
+ * The whole island hides on the lock screen, while dozing, while the shade is open, while the
+ * status bar is hidden (full-screen apps) and in landscape. Off by default; settings are the
+ * Settings.Secure keys below.
  */
 @SysUISingleton
 class MiraCLOIslandController
@@ -58,49 +74,67 @@ constructor(
     private val context: Context,
     private val windowManager: WindowManager,
     private val mediaDataManager: MediaDataManager,
+    private val notificationListener: NotificationListener,
     private val commandQueue: CommandQueue,
     private val shadeExpansionStateManager: ShadeExpansionStateManager,
     private val statusBarStateController: StatusBarStateController,
     private val activityStarter: ActivityStarter,
     @Main private val mainHandler: Handler,
     @Background private val bgExecutor: Executor,
-) : CoreStartable, MediaDataManager.Listener {
+) : CoreStartable, MediaDataManager.Listener, NotificationListener.NotificationHandler {
 
-    private val sessions = LinkedHashMap<String, MediaData>()
+    private val reader = IslandNotificationReader(context)
+
+    // Settings ------------------------------------------------------------------------------------
 
     private var islandEnabled = false
-    private var mediaEnabled = true
+    private var showMedia = true
+    private var showCalls = true
+    private var showTimers = true
+    private var hideWhileOpen = true
+    private var severalActivities = true
+    private var config = MiraCLOIslandView.Config()
+
+    // Global conditions ---------------------------------------------------------------------------
+
     private var statusBarShowing = true
     private var shadeOpen = false
     private var dozing = false
     private var barState = StatusBarState.SHADE
 
-    /** Packages with a visible, non picture-in-picture task (what is on screen). */
-    private var foregroundPackages: Set<String> = emptySet()
+    // Activities ----------------------------------------------------------------------------------
 
-    /**
-     * The app just opened from the island: treated as on screen right away, for a moment, so the
-     * island does not flash back before the app's window appears.
-     */
+    /** Media sessions from the media pipeline (one island activity: the current session). */
+    private val sessions = LinkedHashMap<String, MediaData>()
+    private var mediaArtKey: String? = null
+    private var mediaArt: Bitmap? = null
+    private var mediaAccent = DEFAULT_ACCENT
+
+    /** All live activities by key. */
+    private val activities = LinkedHashMap<String, IslandActivity>()
+    /** Every activity key, newest first (see the class comment). */
+    private val order = ArrayList<String>()
+    /** Keys opened as cards, top card first. */
+    private val cards = ArrayList<String>()
+    /** Swiped-away activities: key -> signature at that moment. */
+    private val dismissed = HashMap<String, String>()
+    /** Notification reads in flight: key -> sequence, so a late read never revives a removed one. */
+    private val readSeq = HashMap<String, Int>()
+    private var seqCounter = 0
+
+    /** Packages with a visible, non picture-in-picture task. */
+    private var foregroundPackages: Set<String> = emptySet()
     private var launchingPackage: String? = null
     private var launchingUntil = 0L
 
     private var view: MiraCLOIslandView? = null
-
-    /**
-     * The song that was swiped away (and its app). The island stays hidden until the next song,
-     * or until that app has been opened again.
-     */
-    private var dismissedKey: String? = null
-    private var dismissedPackage: String? = null
-
     private val updateRunnable = Runnable { update() }
 
     private val settingsObserver =
         object : ContentObserver(mainHandler) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {
                 readSettings()
-                clearDismissal("settings changed")
+                dismissed.clear()
                 update()
             }
         }
@@ -114,7 +148,7 @@ constructor(
 
     override fun start() {
         val resolver = context.contentResolver
-        for (key in listOf(KEY_ENABLED, KEY_MEDIA)) {
+        for (key in ALL_KEYS) {
             resolver.registerContentObserver(
                 Settings.Secure.getUriFor(key),
                 false,
@@ -125,6 +159,15 @@ constructor(
         readSettings()
 
         mediaDataManager.addListener(this)
+        notificationListener.addNotificationHandler(this)
+        // Notifications already posted before we were listening.
+        mainHandler.post {
+            try {
+                notificationListener.activeNotifications?.forEach { onPosted(it) }
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "Could not read active notifications", e)
+            }
+        }
 
         commandQueue.addCallback(
             object : CommandQueue.Callbacks {
@@ -181,12 +224,24 @@ constructor(
 
     private fun readSettings() {
         val user = ActivityManager.getCurrentUser()
-        val resolver = context.contentResolver
-        islandEnabled = Settings.Secure.getIntForUser(resolver, KEY_ENABLED, 0, user) != 0
-        mediaEnabled = Settings.Secure.getIntForUser(resolver, KEY_MEDIA, 1, user) != 0
+        val r = context.contentResolver
+        fun on(key: String, def: Int) = Settings.Secure.getIntForUser(r, key, def, user) != 0
+        islandEnabled = on(KEY_ENABLED, 0)
+        showMedia = on(KEY_MEDIA, 1)
+        showCalls = on(KEY_CALLS, 1)
+        showTimers = on(KEY_TIMERS, 1)
+        hideWhileOpen = on(KEY_HIDE_WHILE_OPEN, 1)
+        severalActivities = on(KEY_SEVERAL, 1)
+        config =
+            MiraCLOIslandView.Config(
+                touchGlow = on(KEY_TOUCH_GLOW, 1),
+                ambientGlow = on(KEY_AMBIENT_GLOW, 1),
+                haptics = on(KEY_HAPTICS, 1),
+            )
+        view?.config = config
     }
 
-    // What is on screen ---------------------------------------------------------------------------
+    // What is on screen ----------------------------------------------------------------------------
 
     /** Reads the visible tasks off the main thread, then updates on the main thread. */
     private fun refreshForeground() {
@@ -208,47 +263,35 @@ constructor(
             mainHandler.post {
                 if (packages == foregroundPackages) return@post
                 foregroundPackages = packages
-                // Opening the app again brings a swiped-away island back (once it is minimised).
-                if (dismissedPackage != null && dismissedPackage in packages) {
-                    clearDismissal("app opened")
-                }
-                if (launchingPackage != null && launchingPackage in packages) {
-                    launchingPackage = null
-                }
+                // Opening the app again brings its swiped-away activity back (once minimised).
+                dismissed.keys.removeAll { key -> activities[key]?.packageName in packages }
+                if (launchingPackage != null && launchingPackage in packages) launchingPackage = null
                 update()
             }
         }
     }
 
-    private fun isOnScreen(packageName: String): Boolean =
-        packageName in foregroundPackages ||
-            (packageName == launchingPackage && SystemClock.uptimeMillis() < launchingUntil)
+    private fun isOnScreen(pkg: String): Boolean =
+        pkg in foregroundPackages ||
+            (pkg == launchingPackage && SystemClock.uptimeMillis() < launchingUntil)
 
-    // MediaDataManager.Listener ----------------------------------------------------------------
+    // Media ----------------------------------------------------------------------------------------
 
-    override fun onMediaDataLoaded(
-        key: String,
-        oldKey: String?,
-        data: MediaData,
-        immediately: Boolean,
-    ) {
+    override fun onMediaDataLoaded(key: String, oldKey: String?, data: MediaData, immediately: Boolean) {
         mainHandler.post {
             if (oldKey != null && oldKey != key) sessions.remove(oldKey)
-            // Re-insert so the most recently updated session is last.
             sessions.remove(key)
             sessions[key] = data
-            update()
+            refreshMedia()
         }
     }
 
     override fun onMediaDataRemoved(key: String, userInitiated: Boolean) {
         mainHandler.post {
             sessions.remove(key)
-            update()
+            refreshMedia()
         }
     }
-
-    // State --------------------------------------------------------------------------------------
 
     /** The session to show: a playing one first, otherwise the latest active one. */
     private fun currentSession(): MediaData? {
@@ -256,88 +299,220 @@ constructor(
         return active.lastOrNull { it.isPlaying == true } ?: active.lastOrNull()
     }
 
-    /** Other recent players (newest first) that can be resumed from the expanded island. */
+    private fun refreshMedia() {
+        val data = currentSession()
+        if (data == null) {
+            removeActivity(MEDIA_KEY)
+            return
+        }
+        // Decode the art only when the song changes.
+        val artKey = "${data.packageName}|${data.song}|${data.artist}|${data.artwork != null}"
+        if (artKey != mediaArtKey) {
+            mediaArtKey = artKey
+            mediaArt = data.artwork?.loadDrawable(context)?.let { toBitmap(it) }
+            mediaAccent = mediaArt?.let { vivid(averageColor(it)) } ?: DEFAULT_ACCENT
+        }
+        putActivity(
+            IslandActivity(
+                key = MEDIA_KEY,
+                kind = IslandKind.MEDIA,
+                packageName = data.packageName,
+                accent = mediaAccent,
+                title = data.song ?: "",
+                subtitle = data.artist ?: data.app,
+                art = mediaArt,
+                clock = null,
+                actions = emptyList(),
+                contentIntent = data.clickIntent,
+                media = data,
+                recents = recentSessions(data),
+                signature = "${data.packageName}|${data.song}",
+            )
+        )
+    }
+
+    /** Other recent players (newest first) that can be resumed from the music card. */
     private fun recentSessions(current: MediaData): List<MediaData> =
         sessions.values
             .filter { it !== current && it.artwork != null && it.packageName != current.packageName }
             .reversed()
             .distinctBy { it.packageName }
-            .take(MAX_RECENTS)
+            .take(4)
 
-    private fun keyOf(data: MediaData) = "${data.packageName}|${data.song}"
+    // Notifications ----------------------------------------------------------------------------------
 
-    private fun clearDismissal(reason: String) {
-        if (dismissedKey == null) return
-        Log.d(TAG, "Island back: $reason")
-        dismissedKey = null
-        dismissedPackage = null
+    override fun onNotificationPosted(sbn: StatusBarNotification, rankingMap: RankingMap?) =
+        onPosted(sbn)
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification, rankingMap: RankingMap?) =
+        onRemoved(sbn)
+
+    override fun onNotificationRemoved(
+        sbn: StatusBarNotification,
+        rankingMap: RankingMap?,
+        reason: Int,
+    ) = onRemoved(sbn)
+
+    override fun onNotificationRankingUpdate(rankingMap: RankingMap?) {}
+
+    override fun onNotificationsInitialized() {}
+
+    private fun onPosted(sbn: StatusBarNotification) {
+        if (!reader.isCandidate(sbn)) {
+            // It may have been a call or a timer before (e.g. a call turning into a missed call).
+            if (activities.containsKey(sbn.key)) removeActivity(sbn.key)
+            return
+        }
+        val seq = ++seqCounter
+        readSeq[sbn.key] = seq
+        // Inflating the Clock layout is the costly part: off the main thread.
+        bgExecutor.execute {
+            val activity = reader.read(sbn)
+            mainHandler.post {
+                if (readSeq[sbn.key] != seq) return@post
+                readSeq.remove(sbn.key)
+                if (activity == null) removeActivity(sbn.key) else putActivity(activity)
+            }
+        }
     }
+
+    private fun onRemoved(sbn: StatusBarNotification) {
+        // Invalidate any read in flight, then drop it.
+        readSeq[sbn.key] = ++seqCounter
+        removeActivity(sbn.key)
+    }
+
+    // State ------------------------------------------------------------------------------------------
+
+    private fun putActivity(activity: IslandActivity) {
+        val isNew = !activities.containsKey(activity.key)
+        activities[activity.key] = activity
+        dismissed[activity.key]?.let { if (it != activity.signature) dismissed.remove(activity.key) }
+        if (isNew) {
+            order.remove(activity.key)
+            // While cards are open, a new activity goes beside the camera and leaves the main pill
+            // where the user is looking; otherwise the newest becomes the main pill.
+            val at = if (cards.isNotEmpty() && order.isNotEmpty()) 1 else 0
+            order.add(at, activity.key)
+        }
+        update()
+    }
+
+    private fun removeActivity(key: String) {
+        if (activities.remove(key) == null) return
+        order.remove(key)
+        cards.remove(key)
+        dismissed.remove(key)
+        view?.setExitStyle(key, MiraCLOIslandView.Exit.ENDED)
+        update()
+    }
+
+    private fun isShown(a: IslandActivity): Boolean =
+        when (a.kind) {
+                IslandKind.MEDIA -> showMedia
+                IslandKind.CALL -> showCalls
+                IslandKind.TIMER,
+                IslandKind.STOPWATCH -> showTimers
+            } &&
+            !dismissed.containsKey(a.key) &&
+            !(hideWhileOpen && isOnScreen(a.packageName))
 
     private fun isPortrait() =
         context.resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE
 
     private fun update() {
-        val current = currentSession()
-        // A swiped-away island comes back with the next song, or once the music app has gone.
-        val dismissed = dismissedKey
-        if (dismissed != null) {
-            when {
-                current == null -> clearDismissal("session ended")
-                keyOf(current) != dismissed -> clearDismissal("next song")
-            }
-        }
+        val visible =
+            order
+                .mapNotNull { activities[it] }
+                .filter { isShown(it) }
+                .take(if (severalActivities) MAX_VISIBLE else 1)
+        cards.retainAll { key -> visible.any { it.key == key } }
+
         val show =
             islandEnabled &&
-                mediaEnabled &&
-                current != null &&
-                dismissedKey == null &&
-                !isOnScreen(current.packageName) &&
+                visible.isNotEmpty() &&
                 statusBarShowing &&
                 !shadeOpen &&
                 !dozing &&
                 barState == StatusBarState.SHADE &&
                 isPortrait()
         if (!show) {
+            cards.clear()
             removeWindow()
             return
         }
+        val pills = visible.filter { it.key !in cards }
+        val openCards = cards.mapNotNull { key -> visible.firstOrNull { it.key == key } }
         val v = view ?: addWindow() ?: return
-        v.bind(current, recentSessions(current))
+        v.render(MiraCLOIslandView.State(pills = pills, cards = openCards))
     }
 
-    // Window -------------------------------------------------------------------------------------
+    // Window -------------------------------------------------------------------------------------------
+
+    private val host =
+        object : MiraCLOIslandView.Host {
+            override fun mainHandler(): Handler = mainHandler
+
+            override fun onTapPill(key: String) {
+                if (!activities.containsKey(key)) return
+                cards.remove(key)
+                cards.add(0, key)
+                update()
+            }
+
+            override fun onSwap(fromKey: String, toKey: String): Boolean {
+                val a = order.indexOf(fromKey)
+                val b = order.indexOf(toKey)
+                if (a < 0 || b < 0) return false
+                order[a] = toKey
+                order[b] = fromKey
+                update()
+                return true
+            }
+
+            override fun onDismiss(key: String) {
+                val a = activities[key] ?: return
+                dismissed[key] = a.signature
+                cards.remove(key)
+                view?.setExitStyle(key, MiraCLOIslandView.Exit.SWIPED_UP)
+                update()
+            }
+
+            override fun onOpenApp(key: String) {
+                val a = activities[key] ?: return
+                val intent: PendingIntent = a.contentIntent ?: return
+                activityStarter.postStartActivityDismissingKeyguard(intent)
+                // The app comes to the front: its activity vanishes and stays away while the app
+                // is on screen; the others stay.
+                launchingPackage = a.packageName
+                launchingUntil = SystemClock.uptimeMillis() + LAUNCH_GRACE_MS
+                cards.clear()
+                view?.setExitStyle(key, MiraCLOIslandView.Exit.OPENED)
+                mainHandler.removeCallbacks(updateRunnable)
+                mainHandler.postDelayed(updateRunnable, LAUNCH_GRACE_MS + 50)
+                update()
+            }
+
+            override fun onCollapseAll() {
+                if (cards.isEmpty()) return
+                cards.clear()
+                update()
+            }
+
+            override fun onAction(key: String, action: IslandAction) {
+                try {
+                    action.intent.send()
+                } catch (e: PendingIntent.CanceledException) {
+                    Log.w(TAG, "Action no longer available", e)
+                }
+            }
+        }
 
     private fun addWindow(): MiraCLOIslandView? {
-        val v =
-            MiraCLOIslandView(
-                context,
-                object : MiraCLOIslandView.Host {
-                    override fun openApp(intent: PendingIntent) {
-                        val pkg = currentSession()?.packageName ?: intent.creatorPackage
-                        activityStarter.postStartActivityDismissingKeyguard(intent)
-                        // The app comes to the front: the island vanishes and stays away while
-                        // the app is on screen.
-                        launchingPackage = pkg
-                        launchingUntil = SystemClock.uptimeMillis() + LAUNCH_GRACE_MS
-                        mainHandler.removeCallbacks(updateRunnable)
-                        mainHandler.postDelayed(updateRunnable, LAUNCH_GRACE_MS + 50)
-                        vanishWindow()
-                    }
-
-                    override fun mainHandler(): Handler = mainHandler
-
-                    override fun dismiss() {
-                        val current = currentSession()
-                        dismissedKey = current?.let { keyOf(it) }
-                        dismissedPackage = current?.packageName
-                        Log.d(TAG, "Island swiped away")
-                        removeWindow()
-                    }
-                },
-            )
+        val v = MiraCLOIslandView(context, host).also { it.config = config }
         val lp =
-            // Full width so the pill can be swiped off the screen edge; only the pill or the card
-            // itself takes touches (see MiraCLOIslandView).
+            // Full width so pills and cards can move freely; only the pills and cards themselves
+            // take touches (see MiraCLOIslandView).
             WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -367,12 +542,6 @@ constructor(
         }
     }
 
-    /** Quick fade, then remove (used when the app is opened from the island). */
-    private fun vanishWindow() {
-        val v = view ?: return
-        v.vanish { if (view === v) removeWindow() }
-    }
-
     private fun removeWindow() {
         val v = view ?: return
         view = null
@@ -384,15 +553,61 @@ constructor(
         }
     }
 
+    // Helpers ----------------------------------------------------------------------------------------
+
+    private fun toBitmap(drawable: Drawable): Bitmap? {
+        if (drawable is BitmapDrawable && drawable.bitmap != null) return drawable.bitmap
+        val w = drawable.intrinsicWidth.takeIf { it > 0 } ?: return null
+        val h = drawable.intrinsicHeight.takeIf { it > 0 } ?: return null
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        drawable.setBounds(0, 0, w, h)
+        drawable.draw(canvas)
+        return bmp
+    }
+
+    private fun averageColor(bitmap: Bitmap): Int =
+        Bitmap.createScaledBitmap(bitmap, 1, 1, true).getPixel(0, 0) or 0xFF000000.toInt()
+
+    /** A brighter, more saturated version of a colour, used for glows and the sound bars. */
+    private fun vivid(color: Int): Int {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(color, hsv)
+        hsv[1] = maxOf(hsv[1], 0.55f)
+        hsv[2] = maxOf(hsv[2], 0.92f)
+        return Color.HSVToColor(hsv)
+    }
+
     companion object {
         private const val TAG = "MiraCLOIsland"
-        private const val MAX_RECENTS = 4
+        private const val MEDIA_KEY = "miraclo:media"
+        private const val MAX_VISIBLE = 3
         private const val MAX_TASKS = 8
         private const val LAUNCH_GRACE_MS = 1500L
+        private val DEFAULT_ACCENT = 0xFF34D399.toInt()
 
         /** Settings.Secure: 1 = Dynamic Island on (default 0). */
         const val KEY_ENABLED = "miraclo_island_enabled"
-        /** Settings.Secure: 1 = show media playback in the island (default 1). */
         const val KEY_MEDIA = "miraclo_island_media"
+        const val KEY_CALLS = "miraclo_island_calls"
+        const val KEY_TIMERS = "miraclo_island_timers"
+        const val KEY_HIDE_WHILE_OPEN = "miraclo_island_hide_while_open"
+        const val KEY_SEVERAL = "miraclo_island_several"
+        const val KEY_TOUCH_GLOW = "miraclo_island_touch_glow"
+        const val KEY_AMBIENT_GLOW = "miraclo_island_ambient_glow"
+        const val KEY_HAPTICS = "miraclo_island_haptics"
+
+        private val ALL_KEYS =
+            listOf(
+                KEY_ENABLED,
+                KEY_MEDIA,
+                KEY_CALLS,
+                KEY_TIMERS,
+                KEY_HIDE_WHILE_OPEN,
+                KEY_SEVERAL,
+                KEY_TOUCH_GLOW,
+                KEY_AMBIENT_GLOW,
+                KEY_HAPTICS,
+            )
     }
 }

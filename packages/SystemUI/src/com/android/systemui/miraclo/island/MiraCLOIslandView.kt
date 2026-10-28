@@ -9,27 +9,23 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.annotation.SuppressLint
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ColorFilter
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Outline
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PixelFormat
 import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.Shader
 import android.graphics.Typeface
-import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaMetadata
 import android.media.session.MediaController
@@ -40,6 +36,7 @@ import android.os.UserHandle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.text.TextUtils
+import android.util.PathParser
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -72,636 +69,329 @@ import kotlin.math.sign
 /**
  * The Dynamic Island window content.
  *
- * - The pill sits on the status bar line around the front camera. Tap: open the card. Pull down:
- *   open the app. Swipe sideways (past a third of the screen, or a flick): hide. Small drags
- *   spring back. Long press does nothing but lift it.
- * - The card opens below the camera, morphing out of the pill (and back into it): one shape that
- *   grows, moves down and turns from black into frosted glass. Tap: open the app. Swipe up: back
- *   into the pill (follows the finger). Swipe left / right / down: stretches a little and springs
- *   back. Long press: only the touch glow.
+ * Every activity is ONE view ([Item]) that is always the same shape, morphed between three forms:
+ * a round pill beside the camera, the main pill on the camera, and a card under the status bar.
+ * Each change of state only retargets those shapes (position, size, corners, how much "card" and
+ * how much "bubble" they are) and animates from wherever they are now, so every transition is a
+ * single continuous movement and an interrupted one simply carries on to the new target.
  *
- * All motion is short and subtle. The morph only moves an outline clip and a translation (no
- * re-layout), and the blurred glow is drawn once and then just moved.
+ * Morphing never re-lays out anything: the shape is an outline clip plus a translation, the card
+ * contents fade as one GPU layer, and the coloured glow is drawn once and then only moved.
  */
 @SuppressLint("ViewConstructor")
 class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(context) {
 
     interface Host {
-        /** Open the app (the island vanishes while the app is on screen). */
-        fun openApp(intent: PendingIntent)
-
         fun mainHandler(): Handler
 
-        /** The pill was swiped away; hide it until the next song or until the app is opened. */
-        fun dismiss()
+        /** A pill was tapped: open it as the top card. */
+        fun onTapPill(key: String)
+
+        /** The main pill was swiped onto a round pill: swap them. False if that is not possible. */
+        fun onSwap(fromKey: String, toKey: String): Boolean
+
+        /** The main pill was swiped up: close it. */
+        fun onDismiss(key: String)
+
+        /** Open the activity's app (tap a card, pull the main pill down). */
+        fun onOpenApp(key: String)
+
+        /** Fold every card back into its pill (tap outside, swipe a card up). */
+        fun onCollapseAll()
+
+        /** A card button (pause, lap, end call, ...). */
+        fun onAction(key: String, action: IslandAction)
     }
 
-    // Sizes ---------------------------------------------------------------------------------------
+    data class Config(
+        val touchGlow: Boolean = true,
+        val ambientGlow: Boolean = true,
+        val haptics: Boolean = true,
+    )
 
-    private val pillW = dp(186)
-    private val pillH = dp(34)
-    private val cardRadius = dp(34).toFloat()
-    /** Room under the card for the pull-down stretch and the ambient glow. */
-    private val bottomRoom = dp(40)
-    /** Room under the pill for dragging it around (only the pill itself takes touches). */
-    private val pillDragRoom = dp(120)
+    /** [pills]: main, right, left (in that order). [cards]: top card first. */
+    data class State(val pills: List<IslandActivity>, val cards: List<IslandActivity>)
 
-    // Motion ----------------------------------------------------------------------------------------
+    /** How an activity leaves when it is no longer shown. */
+    enum class Exit {
+        /** The activity ended: it shrinks back into the camera. */
+        ENDED,
+        /** Swiped up: it slides up and fades. */
+        SWIPED_UP,
+        /** Its app opened over it: a quick fade. */
+        OPENED,
+    }
 
-    /** Expand: quick start, long soft landing. */
+    private enum class Role { MAIN, RIGHT, LEFT, CARD }
+
+    var config = Config()
+        set(value) {
+            field = value
+            items.values.forEach { it.onConfigChanged() }
+        }
+
+    // Sizes --------------------------------------------------------------------------------------
+
+    private val pillW = dp(186).toFloat()
+    private val pillH = dp(34).toFloat()
+    private val bubbleGap = dp(6).toFloat()
+    private val compactH = dp(68)
+    private val compactRadius = dp(26).toFloat()
+    private val cardRadius = dp(30).toFloat()
+    private val cardGap = dp(8).toFloat()
+    private val auraMargin = dp(36)
+    private val auraHeight = dp(330)
+    private val pillZoneRoom = dp(70)
+
+    // Motion -------------------------------------------------------------------------------------
+
+    /** Large moves (open / close cards): quick start, long soft landing. */
     private val decelerate = PathInterpolator(0.05f, 0.7f, 0.1f, 1f)
-    /** Collapse / vanish: standard, slightly quicker. */
+    /** Exits. */
     private val standard = PathInterpolator(0.3f, 0f, 0.1f, 1f)
+    /** Pill moves and snap-backs: one small (about 2%) overshoot, never a wobble. */
+    private val softSpring =
+        Interpolator { t ->
+            if (t >= 1f) 1f else 1f - exp(-t * 11f) * cos(t * 1.4f * 2f * PI).toFloat()
+        }
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private val longPressMs = ViewConfiguration.getLongPressTimeout().toLong()
     private val flingVelocity = dp(1000).toFloat()
     private val vibrator: Vibrator? = context.getSystemService(Vibrator::class.java)
 
-    /** A gentle spring: settles with one small overshoot (about 2 percent), never a wobble. */
-    private val softSpring =
-        Interpolator { t ->
-            if (t >= 1f) 1f
-            else 1f - exp(-t * 11f) * cos(t * 1.4f * 2f * PI).toFloat()
-        }
+    // State --------------------------------------------------------------------------------------
 
-    // State -----------------------------------------------------------------------------------------
+    private val items = LinkedHashMap<String, Item>()
+    private val exitStyles = HashMap<String, Exit>()
+    private var state = State(emptyList(), emptyList())
+    private var retargetPending = false
+    private var released = false
 
-    private var data: MediaData? = null
-    private var recents: List<MediaData> = emptyList()
-    private var artKey: String? = null
-    private var recentsKey: String? = null
-    private var expanded = false
-    /** Swiped away or opening the app: ignore touches until the window goes. */
-    private var leaving = false
-    private var vanishing = false
-    private var accent = DEFAULT_ACCENT
-    private var artColor = DEFAULT_ACCENT
-    private var mediaController: MediaController? = null
-    private var durationMs = 0L
-    private var morphAnimator: ValueAnimator? = null
-
-    // Views -----------------------------------------------------------------------------------------
-
-    private val aura = AuraView(context)
-    private val card = CardView(context)
-    private val pill = PillView(context)
-
-    private val content = LinearLayout(context)
-    private val art = roundedImage(dp(46), dp(10).toFloat())
-    private val title = text(16f, Color.WHITE, bold = true)
-    private val subtitle = text(14f, 0xA8FFFFFF.toInt(), bold = false)
-    private val appBadge = ImageView(context)
-    private val progress = ProgressLine(context)
-    private val elapsed = text(12f, 0x9EFFFFFF.toInt(), bold = false)
-    private val total = text(12f, 0x9EFFFFFF.toInt(), bold = false)
-    private val outputButton = controlButton()
-    private val prevButton = controlButton()
-    private val playButton = controlButton()
-    private val nextButton = controlButton()
-    private val customButton = controlButton()
-    private val recentRow = LinearLayout(context)
-
-    private val playIcon = PlayPauseDrawable()
-    private val prevIcon = SkipDrawable(forward = false)
-    private val nextIcon = SkipDrawable(forward = true)
-
-    private val collapseRunnable = Runnable { setExpanded(false) }
-    private val progressRunnable =
+    private val collapseRunnable = Runnable { host.onCollapseAll() }
+    private val tickRunnable =
         object : Runnable {
             override fun run() {
-                updateProgress()
-                if (expanded) host.mainHandler().postDelayed(this, PROGRESS_INTERVAL_MS)
+                if (released) return
+                var keepGoing = false
+                for (item in items.values) keepGoing = item.tick() or keepGoing
+                if (keepGoing) host.mainHandler().postDelayed(this, TICK_MS)
             }
         }
 
-    /**
-     * Only the pill (or the card) takes touches; the rest of the window lets them through to the
-     * app below, and a touch there collapses the card (ACTION_OUTSIDE).
-     */
+    /** Only pills and cards take touches; elsewhere the window lets touches through. */
     private val touchRect = Rect()
     private val insetsListener =
         ViewTreeObserver.OnComputeInternalInsetsListener { info ->
             info.setTouchableInsets(ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_REGION)
-            val target = if (expanded) card else pill
-            if (leaving || target.visibility != VISIBLE) {
-                info.touchableRegion.setEmpty()
-                return@OnComputeInternalInsetsListener
+            info.touchableRegion.setEmpty()
+            for (item in items.values) {
+                if (item.leaving) continue
+                item.hitRect(touchRect)
+                info.touchableRegion.op(touchRect, android.graphics.Region.Op.UNION)
             }
-            target.getHitRect(touchRect)
-            if (target === pill) touchRect.inset(-dp(6), -dp(6))
-            info.touchableRegion.set(touchRect)
+        }
+
+    private val preDraw =
+        ViewTreeObserver.OnPreDrawListener {
+            if (retargetPending) {
+                retargetPending = false
+                retarget()
+            }
+            true
         }
 
     init {
         clipChildren = false
         clipToPadding = false
-
-        // Order matters: the pill stays on top so it can fade over the card as the card grows.
-        addView(aura, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        addView(
-            card,
-            LayoutParams(cardWidth(), LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
-                .apply { setMargins(0, cardTop(), 0, bottomRoom) },
-        )
-        addView(
-            pill,
-            LayoutParams(pillW, pillH, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
-                setMargins(0, pillTop(), 0, pillDragRoom)
-            },
-        )
-        buildCard()
-
-        pill.contentDescription = "Now playing. Tap to expand, swipe sideways to hide"
-        aura.visibility = GONE
-        card.visibility = GONE
+        minimumHeight = pillZoneHeight()
     }
 
-    // Geometry --------------------------------------------------------------------------------------
+    // Geometry -----------------------------------------------------------------------------------
 
-    /** Top of the pill: centred on the status bar icons (clock, battery), around the camera. */
-    private fun pillTop(): Int {
-        val barHeight = SystemBarUtils.getStatusBarHeight(context)
+    private fun statusBarHeight() = SystemBarUtils.getStatusBarHeight(context)
+
+    /** Pills are centred on the status bar icons (clock, battery), around the camera. */
+    private fun pillTop(): Float {
         val padTop = resources.getDimensionPixelSize(R.dimen.status_bar_padding_top)
-        return max(0, (barHeight + padTop) / 2 - pillH / 2)
+        return max(0f, (statusBarHeight() + padTop) / 2f - pillH / 2f)
     }
 
-    /** Top of the card: one pill-height below the camera hole, so the card never covers it. */
-    private fun cardTop(): Int {
+    /** Cards sit just under the status bar, with a small gap. */
+    private fun cardTop(): Float = statusBarHeight() + dp(6).toFloat()
+
+    private fun cardWidth(): Int = min(resources.displayMetrics.widthPixels - dp(36), dp(420))
+
+    private fun cameraX(): Float {
         val cutout = context.display?.cutout?.boundingRectTop
-        val cameraBottom =
-            if (cutout != null && !cutout.isEmpty) cutout.bottom else pillTop() + pillH
-        return max(cameraBottom, pillTop() + pillH) + pillH
+        return if (cutout != null && !cutout.isEmpty) cutout.exactCenterX() else width / 2f
     }
 
-    private fun cardWidth(): Int = min(context.resources.displayMetrics.widthPixels - dp(36), dp(420))
+    private fun pillZoneHeight() = (pillTop() + pillH).toInt() + pillZoneRoom
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         viewTreeObserver.addOnComputeInternalInsetsListener(insetsListener)
+        viewTreeObserver.addOnPreDrawListener(preDraw)
     }
 
     override fun onDetachedFromWindow() {
         viewTreeObserver.removeOnComputeInternalInsetsListener(insetsListener)
+        viewTreeObserver.removeOnPreDrawListener(preDraw)
         super.onDetachedFromWindow()
     }
 
     fun onHostConfigurationChanged() {
-        (card.layoutParams as LayoutParams).apply {
-            width = cardWidth()
-            topMargin = cardTop()
+        val w = cardWidth()
+        for (item in items.values) {
+            (item.layoutParams as LayoutParams).width = w
+            (item.aura.layoutParams as LayoutParams).width = w + auraMargin * 2
         }
-        (pill.layoutParams as LayoutParams).topMargin = pillTop()
+        retargetPending = true
         requestLayout()
-    }
-
-    // Data ------------------------------------------------------------------------------------------
-
-    fun bind(data: MediaData, recents: List<MediaData>) {
-        val changedSession = this.data?.instanceId != data.instanceId
-        this.data = data
-        this.recents = recents
-
-        // Decoding the art is the only costly part; do it only when the song changes.
-        val key = "${data.packageName}|${data.song}|${data.artist}|${data.artwork != null}"
-        if (key != artKey) {
-            artKey = key
-            val artBitmap = data.artwork?.loadDrawable(context)?.let { toBitmap(it) }
-            if (artBitmap != null) {
-                artColor = averageColor(artBitmap)
-                accent = vivid(artColor)
-            } else {
-                artColor = DEFAULT_ACCENT
-                accent = DEFAULT_ACCENT
-            }
-            pill.art = artBitmap
-            pill.accent = accent
-            art.setImageBitmap(artBitmap)
-            aura.colors(artColor, accent)
-            card.accent = accent
-            appBadge.setImageIcon(data.appIcon)
-        }
-
-        pill.playing = data.isPlaying == true
-        pill.invalidate()
-
-        title.text = data.song ?: ""
-        subtitle.text = data.artist ?: data.app ?: ""
-        // Our own icons, so the row always looks the same and play / pause always shows the real
-        // state (the apps' animated icons start on the opposite shape).
-        val actions = data.semanticActions
-        bindControl(prevButton, prevIcon, actions?.prevOrCustom, "Previous")
-        bindControl(nextButton, nextIcon, actions?.nextOrCustom, "Next")
-        val playPause = actions?.playOrPause
-        playIcon.setPlaying(data.isPlaying == true, animate = playButton.isAttachedToWindow)
-        playButton.contentDescription = playPause?.contentDescription ?: "Play or pause"
-        playButton.isEnabled = playPause?.action != null
-        playButton.setOnClickListener {
-            val run = playPause?.action ?: return@setOnClickListener
-            run.run()
-            // Flip at once so it feels instant; the next update confirms it.
-            playIcon.setPlaying(!playIcon.playing, animate = true)
-        }
-
-        val custom = actions?.custom0
-        customButton.setImageDrawable(custom?.icon)
-        customButton.contentDescription = custom?.contentDescription ?: "App action"
-        customButton.setOnClickListener { custom?.action?.run() }
-        customButton.visibility =
-            if (custom?.icon != null && custom.action != null) VISIBLE else INVISIBLE
-
-        bindRecents()
-        if (changedSession) mediaController = null
-        if (expanded) updateProgress()
     }
 
     fun release() {
+        released = true
         host.mainHandler().removeCallbacks(collapseRunnable)
-        host.mainHandler().removeCallbacks(progressRunnable)
-        morphAnimator?.cancel()
-        pill.stop()
-        card.stop()
+        host.mainHandler().removeCallbacks(tickRunnable)
+        items.values.forEach { it.stop() }
     }
 
-    /** Fade out quickly (the app is opening over it), then [end]. */
-    fun vanish(end: () -> Unit) {
-        if (vanishing) return
-        vanishing = true
-        leaving = true
-        host.mainHandler().removeCallbacks(collapseRunnable)
-        host.mainHandler().removeCallbacks(progressRunnable)
-        morphAnimator?.cancel()
-        // Let touches through right away.
-        requestLayout()
-        ValueAnimator.ofFloat(1f, 0f).apply {
-            duration = 140
-            interpolator = standard
-            addUpdateListener {
-                val a = it.animatedValue as Float
-                this@MiraCLOIslandView.alpha = a
-                card.setBlurAlpha(a)
-            }
-            addListener(
-                object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: Animator) = end()
-                }
-            )
-            start()
+    // Rendering ----------------------------------------------------------------------------------
+
+    fun setExitStyle(key: String, exit: Exit) {
+        exitStyles[key] = exit
+    }
+
+    fun render(newState: State) {
+        state = newState
+        val shown = newState.pills + newState.cards
+        val keys = shown.map { it.key }.toSet()
+
+        // Leaving.
+        for ((key, item) in items.toMap()) {
+            if (key !in keys && !item.leaving) item.exit(exitStyles.remove(key) ?: Exit.ENDED)
         }
-    }
+        // Arriving / updating.
+        val stacked = newState.cards.size > 1
+        for (activity in shown) {
+            val item = items[activity.key]?.takeIf { !it.leaving } ?: createItem(activity)
+            item.bind(activity, stacked)
+        }
+        exitStyles.keys.retainAll(items.keys)
 
-    // Expand / collapse -----------------------------------------------------------------------------
-
-    private fun setExpanded(value: Boolean) {
-        if (leaving || expanded == value) return
-        expanded = value
-        val handler = host.mainHandler()
-        handler.removeCallbacks(collapseRunnable)
-        handler.removeCallbacks(progressRunnable)
-        if (value) {
-            subtleTick()
-            card.dragX = 0f
-            card.dragY = 0f
-            card.visibility = VISIBLE
-            aura.visibility = VISIBLE
-            // Start once the card has its size, from exactly the pill's shape.
-            card.viewTreeObserver.addOnPreDrawListener(
-                object : ViewTreeObserver.OnPreDrawListener {
-                    override fun onPreDraw(): Boolean {
-                        card.viewTreeObserver.removeOnPreDrawListener(this)
-                        if (expanded) {
-                            card.applyMorph(0f)
-                            animateMorph(1f, EXPAND_MS, decelerate)
-                        }
-                        return true
-                    }
-                }
-            )
-            updateProgress()
-            handler.postDelayed(progressRunnable, PROGRESS_INTERVAL_MS)
-            handler.postDelayed(collapseRunnable, AUTO_COLLAPSE_MS)
+        // Keep the window tall while any card is (or was just) open, so nothing is ever clipped.
+        if (newState.cards.isNotEmpty()) {
+            minimumHeight = max(minimumHeight, (resources.displayMetrics.heightPixels * 0.62f).toInt())
+            scheduleAutoCollapse()
         } else {
-            animateMorph(0f, COLLAPSE_MS, standard) {
-                card.visibility = GONE
-                aura.visibility = GONE
-                card.dragX = 0f
-                card.dragY = 0f
-            }
+            host.mainHandler().removeCallbacks(collapseRunnable)
         }
-        // The touchable area changes (pill <-> card).
+
+        retargetPending = true
         requestLayout()
+        invalidate()
+        startTicking()
     }
 
-    private fun animateMorph(
-        target: Float,
-        duration: Long,
-        interpolator: Interpolator,
-        end: (() -> Unit)? = null,
-    ) {
-        morphAnimator?.cancel()
-        val from = card.morph
-        // Shorter when part of the way is already done (e.g. after a drag).
-        val scaled = (duration * max(0.4f, abs(target - from))).toLong()
-        morphAnimator =
-            ValueAnimator.ofFloat(from, target).apply {
-                this.duration = scaled
-                this.interpolator = interpolator
-                addUpdateListener { card.applyMorph(it.animatedValue as Float) }
-                addListener(
-                    object : AnimatorListenerAdapter() {
-                        private var cancelled = false
+    private fun createItem(activity: IslandActivity): Item {
+        // A key whose old view is still animating out gets a fresh one.
+        items.remove(activity.key)?.let { old -> old.finishExitNow() }
+        val item = Item(context, activity)
+        items[activity.key] = item
+        addView(item.aura, 0, LayoutParams(cardWidth() + auraMargin * 2, auraHeight, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+        addView(item, LayoutParams(cardWidth(), LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+        // A new activity grows out of the camera.
+        val cx = cameraX().takeIf { width > 0 } ?: (resources.displayMetrics.widthPixels / 2f)
+        val dot = dp(12).toFloat()
+        item.jumpTo(Geo(cx - dot / 2f, pillTop() + pillH / 2f - dot / 2f, dot, dot, dot / 2f, 0f, 1f))
+        item.alpha = 0f
+        item.entering = true
+        return item
+    }
 
-                        override fun onAnimationStart(animation: Animator) {
-                            // The contents fade as one GPU layer (smooth, no per-frame re-draw).
-                            content.setLayerType(LAYER_TYPE_HARDWARE, null)
-                        }
-
-                        override fun onAnimationCancel(animation: Animator) {
-                            cancelled = true
-                        }
-
-                        override fun onAnimationEnd(animation: Animator) {
-                            content.setLayerType(LAYER_TYPE_NONE, null)
-                            if (morphAnimator === animation) morphAnimator = null
-                            if (!cancelled) end?.invoke()
-                        }
-                    }
-                )
-                start()
+    /** Works out where every shape should be and sends each one there. */
+    private fun retarget() {
+        if (width == 0) return
+        val cardW = cardWidth().toFloat()
+        val cardLeft = (width - cardW) / 2f
+        var y = cardTop()
+        state.cards.forEachIndexed { i, a ->
+            val item = items[a.key] ?: return@forEachIndexed
+            val h = item.height.toFloat()
+            val r = if (a.kind == IslandKind.MEDIA) cardRadius else compactRadius
+            item.role = Role.CARD
+            item.translationZ = dp(3) * (state.cards.size - i).toFloat()
+            item.animateTo(Geo(cardLeft, y, cardW, h, r, 1f, 0f))
+            y += h + cardGap
+        }
+        val pillLeft = cameraX() - pillW / 2f
+        val top = pillTop()
+        state.pills.forEachIndexed { i, a ->
+            val item = items[a.key] ?: return@forEachIndexed
+            item.translationZ = dp(10).toFloat()
+            when (i) {
+                0 -> {
+                    item.role = Role.MAIN
+                    item.animateTo(Geo(pillLeft, top, pillW, pillH, pillH / 2f, 0f, 0f))
+                }
+                1 -> {
+                    item.role = Role.RIGHT
+                    item.animateTo(Geo(pillLeft + pillW + bubbleGap, top, pillH, pillH, pillH / 2f, 0f, 1f))
+                }
+                else -> {
+                    item.role = Role.LEFT
+                    item.animateTo(Geo(pillLeft - bubbleGap - pillH, top, pillH, pillH, pillH / 2f, 0f, 1f))
+                }
             }
+        }
+    }
+
+    /** Called when any shape finishes moving: shrink the window once nothing needs the room. */
+    private fun onItemSettled() {
+        if (state.cards.isEmpty() && items.values.none { it.moving }) {
+            val target = pillZoneHeight()
+            if (minimumHeight != target) {
+                minimumHeight = target
+                requestLayout()
+            }
+        }
+    }
+
+    private fun removeItem(item: Item) {
+        if (items[item.key] === item) items.remove(item.key)
+        item.stop()
+        removeView(item.aura)
+        removeView(item)
+        onItemSettled()
+    }
+
+    private fun scheduleAutoCollapse() {
+        host.mainHandler().removeCallbacks(collapseRunnable)
+        host.mainHandler().postDelayed(collapseRunnable, AUTO_COLLAPSE_MS)
+    }
+
+    private fun startTicking() {
+        host.mainHandler().removeCallbacks(tickRunnable)
+        host.mainHandler().post(tickRunnable)
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
         if (ev.actionMasked == MotionEvent.ACTION_OUTSIDE) {
-            setExpanded(false)
+            if (state.cards.isNotEmpty()) host.onCollapseAll()
             return true
         }
-        if (leaving) return true
-        if (expanded) {
-            // Any interaction keeps the card open a little longer.
-            host.mainHandler().removeCallbacks(collapseRunnable)
-            host.mainHandler().postDelayed(collapseRunnable, AUTO_COLLAPSE_MS)
-        }
+        if (state.cards.isNotEmpty()) scheduleAutoCollapse()
         return super.dispatchTouchEvent(ev)
     }
 
-    private fun openApp() {
-        val intent = data?.clickIntent ?: return
-        host.openApp(intent)
-    }
-
-    /** Fly the pill off the side, then hide the island. */
-    private fun dismissTo(direction: Float) {
-        if (leaving) return
-        leaving = true
-        host.mainHandler().removeCallbacks(collapseRunnable)
-        requestLayout()
-        subtleTick()
-        pill.animate()
-            .translationX(direction * width.coerceAtLeast(pill.width) * 0.75f)
-            .alpha(0f)
-            .setDuration(220)
-            .setInterpolator(standard)
-            .withEndAction { host.dismiss() }
-            .start()
-    }
-
-    // Card contents ---------------------------------------------------------------------------------
-
-    private fun buildCard() {
-        content.orientation = LinearLayout.VERTICAL
-        content.setPadding(dp(18), dp(18), dp(18), dp(18))
-        card.addView(content, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-
-        // Header: art, title / artist, app badge. Not a button: a tap here opens the app.
-        val header =
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-        header.addView(art, LinearLayout.LayoutParams(dp(46), dp(46)))
-        val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        texts.addView(title)
-        texts.addView(subtitle)
-        header.addView(
-            texts,
-            LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(12)
-                marginEnd = dp(8)
-            },
-        )
-        appBadge.background = circle(Color.WHITE)
-        appBadge.imageTintList = ColorStateList.valueOf(0xFF111111.toInt())
-        appBadge.setPadding(dp(5), dp(5), dp(5), dp(5))
-        header.addView(appBadge, LinearLayout.LayoutParams(dp(26), dp(26)))
-        content.addView(header)
-
-        // Progress: a tall touch area with a thin line, so the song can be dragged to a position.
-        content.addView(
-            progress,
-            LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(24)).apply { topMargin = dp(6) },
-        )
-        val times = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-        times.addView(elapsed, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-        total.gravity = Gravity.END
-        times.addView(total, LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-        content.addView(times, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-
-        // Controls: output, previous, play / pause, next, app action. Five fixed slots, so play /
-        // pause is always in the middle even when an app has no previous or no action.
-        val controls =
-            LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-        outputButton.setImageDrawable(OutputDrawable())
-        outputButton.contentDescription = "Output device"
-        outputButton.setOnClickListener { openOutputSwitcher() }
-        prevButton.setImageDrawable(prevIcon)
-        nextButton.setImageDrawable(nextIcon)
-        playButton.setImageDrawable(playIcon)
-        playButton.imageTintList = null
-        playButton.setPadding(dp(14), dp(14), dp(14), dp(14))
-        playButton.background = circle(Color.WHITE)
-        playButton.elevation = dp(4).toFloat()
-        playButton.outlineAmbientShadowColor = Color.WHITE
-        playButton.outlineSpotShadowColor = Color.WHITE
-        val slots = listOf(outputButton, prevButton, playButton, nextButton, customButton)
-        slots.forEachIndexed { i, button ->
-            val size = if (button === playButton) dp(52) else dp(44)
-            controls.addView(button, LinearLayout.LayoutParams(size, size))
-            if (i < slots.size - 1) {
-                controls.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
-            }
-        }
-        content.addView(
-            controls,
-            LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(10)
-            },
-        )
-
-        // Recently played (other media apps), shown only when there are some.
-        recentRow.orientation = LinearLayout.HORIZONTAL
-        content.addView(
-            recentRow,
-            LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-                topMargin = dp(14)
-            },
-        )
-    }
-
-    private fun bindRecents() {
-        val key = recents.joinToString { "${it.packageName}|${it.song}" }
-        if (key == recentsKey) return
-        recentsKey = key
-        recentRow.removeAllViews()
-        if (recents.isEmpty()) {
-            recentRow.visibility = GONE
-            return
-        }
-        recentRow.visibility = VISIBLE
-        val size = (cardWidth() - dp(36) - dp(10) * 3) / 4
-        for (i in 0 until 4) {
-            val item = recents.getOrNull(i)
-            val tile = roundedImage(size, dp(12).toFloat())
-            if (item != null) {
-                tile.setImageIcon(item.artwork)
-                tile.contentDescription = "Play ${item.song ?: item.app ?: ""}"
-                tile.setOnClickListener {
-                    item.resumeAction?.run() ?: item.clickIntent?.let { host.openApp(it) }
-                }
-            } else {
-                tile.visibility = INVISIBLE
-            }
-            recentRow.addView(
-                tile,
-                LinearLayout.LayoutParams(size, size).apply { if (i > 0) marginStart = dp(10) },
-            )
-        }
-    }
-
-    private fun bindControl(button: ImageButton, icon: SkipDrawable, action: MediaAction?, label: String) {
-        val enabled = action?.action != null
-        button.contentDescription = action?.contentDescription ?: label
-        button.isEnabled = enabled
-        icon.alpha = if (enabled) 255 else 80
-        button.setOnClickListener { action?.action?.run() }
-    }
-
-    private fun openOutputSwitcher() {
-        val d = data ?: return
-        val intent =
-            Intent(MediaOutputConstants.ACTION_LAUNCH_MEDIA_OUTPUT_DIALOG)
-                .setPackage(context.packageName)
-                .putExtra(MediaOutputConstants.EXTRA_PACKAGE_NAME, d.packageName)
-                .putExtra(MediaOutputConstants.EXTRA_USER_HANDLE, UserHandle.of(d.userId))
-        d.token?.let { intent.putExtra(MediaOutputConstants.KEY_MEDIA_SESSION_TOKEN, it) }
-        context.sendBroadcast(intent)
-        setExpanded(false)
-    }
-
-    private fun updateProgress() {
-        val d = data ?: return
-        val controller =
-            mediaController
-                ?: d.token?.let { MediaController(context, it) }.also { mediaController = it }
-        val state = controller?.playbackState
-        val duration = controller?.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-        durationMs = duration
-        progress.seekable =
-            state != null && duration > 0L && (state.actions and PlaybackState.ACTION_SEEK_TO) != 0L
-        if (progress.dragging) return
-        if (state == null || duration <= 0L) {
-            progress.fraction = 0f
-            elapsed.text = ""
-            total.text = ""
-            return
-        }
-        var position = state.position
-        if (state.state == PlaybackState.STATE_PLAYING) {
-            val delta = SystemClock.elapsedRealtime() - state.lastPositionUpdateTime
-            position += (delta * state.playbackSpeed).toLong()
-        }
-        position = position.coerceIn(0L, duration)
-        progress.fraction = position.toFloat() / duration
-        elapsed.text = formatTime(position)
-        total.text = formatTime(duration)
-    }
-
-    // Helpers ---------------------------------------------------------------------------------------
+    // Helpers ------------------------------------------------------------------------------------
 
     private fun dp(value: Int): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics)
-            .toInt()
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()
 
-    private fun text(sizeSp: Float, color: Int, bold: Boolean) =
-        TextView(context).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
-            setTextColor(color)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            typeface = Typeface.create(Typeface.DEFAULT, if (bold) 600 else 400, false)
-        }
-
-    private fun roundedImage(size: Int, radius: Float) =
-        ImageView(context).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            background = GradientDrawable().apply {
-                cornerRadius = radius
-                setColor(0x33FFFFFF)
-            }
-            outlineProvider =
-                object : ViewOutlineProvider() {
-                    override fun getOutline(view: View, outline: Outline) {
-                        outline.setRoundRect(0, 0, view.width, view.height, radius)
-                    }
-                }
-            clipToOutline = true
-            minimumWidth = size
-            minimumHeight = size
-        }
-
-    private fun controlButton() =
-        ImageButton(context).apply {
-            background = null
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            imageTintList = ColorStateList.valueOf(Color.WHITE)
-        }
-
-    private fun circle(color: Int) =
-        GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
-        }
-
-    private fun toBitmap(drawable: Drawable): Bitmap? {
-        if (drawable is BitmapDrawable) return drawable.bitmap
-        val w = drawable.intrinsicWidth.takeIf { it > 0 } ?: return null
-        val h = drawable.intrinsicHeight.takeIf { it > 0 } ?: return null
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        drawable.setBounds(0, 0, w, h)
-        drawable.draw(canvas)
-        return bmp
-    }
-
-    private fun averageColor(bitmap: Bitmap): Int =
-        Bitmap.createScaledBitmap(bitmap, 1, 1, true).getPixel(0, 0) or 0xFF000000.toInt()
-
-    /** A brighter, more saturated version of a colour, used for glows and the sound bars. */
-    private fun vivid(color: Int): Int {
-        val hsv = FloatArray(3)
-        Color.colorToHSV(color, hsv)
-        hsv[1] = max(hsv[1], 0.55f)
-        hsv[2] = max(hsv[2], 0.92f)
-        return Color.HSVToColor(hsv)
-    }
-
-    private fun formatTime(ms: Long): String {
-        val total = ms / 1000
-        return "%d:%02d".format(total / 60, total % 60)
-    }
+    private fun sp(value: Float): Float =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, value, resources.displayMetrics)
 
     private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
 
@@ -713,13 +403,11 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
     /** Resistance: follows the finger at first, then hardly moves, never past [limit]. */
     private fun rubber(distance: Float, limit: Float): Float =
-        if (distance <= 0f) 0f else limit * (1f - exp(-distance / (limit * 2.5f)))
+        sign(distance) * limit * (1f - exp(-abs(distance) / (limit * 2.5f)))
 
-    private fun rubberSigned(distance: Float, limit: Float): Float =
-        sign(distance) * rubber(abs(distance), limit)
-
-    /** A barely-there tap, for snapping back and opening. */
+    /** A barely-there tap. */
     private fun subtleTick() {
+        if (!config.haptics) return
         val v = vibrator ?: return
         if (v.areAllPrimitivesSupported(VibrationEffect.Composition.PRIMITIVE_TICK)) {
             v.vibrate(
@@ -730,7 +418,58 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
     }
 
-    /** Tracks one touch: tap, sideways, up or down, plus how long it was held. */
+    private fun text(sizeSp: Float, color: Int, weight: Int) =
+        TextView(context).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
+            setTextColor(color)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            typeface = Typeface.create(Typeface.DEFAULT, weight, false)
+            fontFeatureSettings = "tnum"
+        }
+
+    private fun circle(color: Int) =
+        GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+        }
+
+    private fun roundRect(color: Int, radius: Float) =
+        GradientDrawable().apply {
+            cornerRadius = radius
+            setColor(color)
+        }
+
+    private fun isLight(color: Int): Boolean {
+        val r = Color.red(color) / 255f
+        val g = Color.green(color) / 255f
+        val b = Color.blue(color) / 255f
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b > 0.55f
+    }
+
+    private fun formatTime(ms: Long): String {
+        val total = ms / 1000
+        return "%d:%02d".format(total / 60, total % 60)
+    }
+
+    // Shapes -------------------------------------------------------------------------------------
+
+    /** Where a shape is: box in window pixels, corner radius, how much card (c) and bubble (b). */
+    private data class Geo(
+        val x: Float,
+        val y: Float,
+        val w: Float,
+        val h: Float,
+        val r: Float,
+        val c: Float,
+        val b: Float,
+    )
+
+    private fun lerpGeo(a: Geo, b: Geo, t: Float) =
+        Geo(lerp(a.x, b.x, t), lerp(a.y, b.y, t), lerp(a.w, b.w, t), lerp(a.h, b.h, t),
+            lerp(a.r, b.r, t), lerp(a.c, b.c, t), lerp(a.b, b.b, t))
+
+    /** Tracks one touch: tap, sideways, up or down, and how long it was held. */
     private inner class Gesture {
         var mode = NONE
         var tracking = false
@@ -788,49 +527,99 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
     }
 
-    // The pill --------------------------------------------------------------------------------------
+    // One activity --------------------------------------------------------------------------------
 
-    /** The compact pill: album art, the camera in the middle, and moving sound bars. */
-    private inner class PillView(context: Context) : View(context) {
-        var art: Bitmap? = null
-        var accent = DEFAULT_ACCENT
-        var playing = true
-        private val body = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val rim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-        private val bar = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        private val rect = RectF()
-        private val artClip = Path()
-        private var phase = 0f
-        private val gesture = Gesture()
+    /**
+     * One activity's shape. Laid out once at card size (centred, top of the window); every form is
+     * that box clipped by an outline and moved by a translation.
+     */
+    private inner class Item(context: Context, first: IslandActivity) : FrameLayout(context) {
+        var activity = first
+            private set
+        val key = first.key
+        val kind = first.kind
+        var role = Role.MAIN
+        var leaving = false
+            private set
+        var entering = false
+        val moving: Boolean
+            get() = animator?.isRunning == true
+
+        val aura = AuraView(context)
+        private val content: CardContent =
+            if (kind == IslandKind.MEDIA) MediaContent(context, this) else CompactContent(context, this)
+
+        private var geo = Geo(0f, 0f, 1f, 1f, 0f, 0f, 0f)
+        private var animator: ValueAnimator? = null
+        private var dragX = 0f
+        private var dragY = 0f
         private var settleAnimator: ValueAnimator? = null
-        private val animator =
+        private val gesture = Gesture()
+        private var ignoreTouch = false
+
+        // Drawing
+        private val clip = RectF()
+        private val clipInt = Rect()
+        private var blur: BackgroundBlurDrawable? = null
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE6141519.toInt() }
+        private val gloss = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val skin = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val pillRim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+        private val cardRim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+        private val touchGlow = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val valuePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+            textSize = sp(14f)
+            textAlign = Paint.Align.RIGHT
+            fontFeatureSettings = "tnum"
+        }
+        private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        private val discPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val tmpRect = RectF()
+        private val artClip = Path()
+        private var pillText = ""
+        private var shaderH = -1f
+        private var touchX = 0f
+        private var touchY = 0f
+        private var glowAlpha = 0f
+        private var glowAnimator: ValueAnimator? = null
+        private var barPhase = 0f
+        private val barAnimator =
             ValueAnimator.ofFloat(0f, 1f).apply {
                 duration = 900
                 repeatCount = ValueAnimator.INFINITE
                 addUpdateListener {
-                    phase = it.animatedValue as Float
-                    if (playing) invalidate()
+                    barPhase = it.animatedValue as Float
+                    if (activity.media?.isPlaying == true && geo.c < 0.5f) invalidate()
                 }
             }
 
         init {
-            isClickable = true
-            // For accessibility (touches are handled in onTouchEvent).
-            setOnClickListener { setExpanded(true) }
+            setWillNotDraw(false)
+            clipChildren = true
             outlineProvider =
                 object : ViewOutlineProvider() {
                     override fun getOutline(view: View, outline: Outline) {
-                        outline.setRoundRect(0, 0, view.width, view.height, view.height / 2f)
+                        clip.roundOut(clipInt)
+                        outline.setRoundRect(clipInt, geo.r)
                     }
                 }
             clipToOutline = true
-            rim.strokeWidth = dp(1).toFloat() / 2f
+            pillRim.strokeWidth = dp(1) / 2f
+            cardRim.strokeWidth = dp(1).toFloat()
+            addView(content.view, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            contentDescription = first.title
         }
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
-            animator.start()
+            blur =
+                viewRootImpl?.createBackgroundBlurDrawable()?.apply {
+                    setBlurRadius(dp(36))
+                    setColor(0x8C141519.toInt())
+                }
+            if (kind == IslandKind.MEDIA) barAnimator.start()
         }
 
         override fun onDetachedFromWindow() {
@@ -839,417 +628,481 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
 
         fun stop() {
-            animator.cancel()
+            animator?.cancel()
             settleAnimator?.cancel()
+            glowAnimator?.cancel()
+            barAnimator.cancel()
         }
+
+        fun onConfigChanged() {
+            aura.invalidate()
+            apply()
+        }
+
+        fun bind(a: IslandActivity, stacked: Boolean) {
+            activity = a
+            contentDescription = a.title
+            content.bind(a, stacked)
+            aura.colors(a.accent, if (a.kind == IslandKind.MEDIA) a.accent else lighten(a.accent))
+            refreshPillText()
+            invalidate()
+        }
+
+        /** Live time; returns true while it needs more ticks. */
+        fun tick(): Boolean {
+            if (leaving) return false
+            val clockRunning = activity.clock?.running == true
+            if (clockRunning && refreshPillText()) invalidate()
+            val cardTicking = content.tick(geo.c > 0.5f)
+            return clockRunning || cardTicking
+        }
+
+        /** Updates the pill's value text; true if it changed. */
+        private fun refreshPillText(): Boolean {
+            val clock = activity.clock
+            val t =
+                when {
+                    clock != null ->
+                        IslandClock.format(clock.millis(), tenths = kind == IslandKind.STOPWATCH)
+                    else -> activity.subtitle?.toString().orEmpty()
+                }
+            if (t == pillText) return false
+            pillText = t
+            return true
+        }
+
+        // Geometry
+
+        fun jumpTo(g: Geo) {
+            animator?.cancel()
+            geo = g
+            apply()
+        }
+
+        fun animateTo(target: Geo) {
+            if (leaving) return
+            if (animator?.isRunning != true && geo == target && !entering) return
+            val from = geo
+            val bigMove = from.c > 0.01f || target.c > 0.01f
+            val wasEntering = entering
+            entering = false
+            animator?.cancel()
+            animator =
+                ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = if (bigMove) 440 else 400
+                    interpolator = if (bigMove) decelerate else softSpring
+                    addUpdateListener {
+                        val t = it.animatedValue as Float
+                        geo = lerpGeo(from, target, t)
+                        if (wasEntering) alpha = smooth(t, 0f, 0.35f)
+                        apply()
+                    }
+                    addListener(
+                        object : AnimatorListenerAdapter() {
+                            override fun onAnimationStart(animation: Animator) {
+                                // Card contents fade as one GPU layer while morphing.
+                                content.view.setLayerType(LAYER_TYPE_HARDWARE, null)
+                            }
+
+                            override fun onAnimationEnd(animation: Animator) {
+                                content.view.setLayerType(LAYER_TYPE_NONE, null)
+                                if (wasEntering) alpha = 1f
+                                onItemSettled()
+                            }
+                        }
+                    )
+                    start()
+                }
+        }
+
+        fun exit(style: Exit) {
+            leaving = true
+            animator?.cancel()
+            settleAnimator?.cancel()
+            val from = geo
+            val camX = cameraX()
+            val target =
+                when (style) {
+                    Exit.ENDED -> {
+                        val dot = dp(12).toFloat()
+                        Geo(camX - dot / 2f, pillTop() + pillH / 2f - dot / 2f, dot, dot, dot / 2f, 0f, 1f)
+                    }
+                    Exit.SWIPED_UP -> from.copy(y = from.y - from.h - dp(24))
+                    Exit.OPENED -> from
+                }
+            val startAlpha = alpha
+            val startDragX = dragX
+            val startDragY = dragY
+            animator =
+                ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = if (style == Exit.OPENED) 160 else 300
+                    interpolator = standard
+                    addUpdateListener {
+                        val t = it.animatedValue as Float
+                        geo = lerpGeo(from, target, t)
+                        dragX = lerp(startDragX, 0f, t)
+                        dragY = lerp(startDragY, 0f, t)
+                        alpha = startAlpha * (1f - smooth(t, if (style == Exit.ENDED) 0.3f else 0f, 1f))
+                        apply()
+                    }
+                    addListener(
+                        object : AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: Animator) = removeItem(this@Item)
+                        }
+                    )
+                    start()
+                }
+        }
+
+        fun finishExitNow() {
+            animator?.end()
+        }
+
+        /** Applies the current shape: translation, clip, glass amount, glow. */
+        fun apply() {
+            val g = geo
+            translationX = g.x - left + dragX
+            translationY = g.y - top + dragY
+            clip.set(0f, 0f, g.w, g.h)
+            elevation = dp(14) * g.c
+            // Shadows only for cards (translationZ orders the stack but must not shade the pills).
+            val shadow = Color.argb((255 * g.c).toInt().coerceIn(0, 255), 0, 0, 0)
+            outlineSpotShadowColor = shadow
+            outlineAmbientShadowColor = shadow
+            content.view.alpha = smooth(g.c, 0.55f, 1f)
+            content.view.translationY = lerp(-dp(8).toFloat(), 0f, smooth(g.c, 0.35f, 1f))
+            aura.translationX = translationX
+            aura.translationY = translationY - auraMargin
+            aura.alpha = if (config.ambientGlow) smooth(g.c, 0.25f, 1f) * alpha else 0f
+            aura.cardHeight = g.h
+            blur?.alpha = (255 * g.c).toInt().coerceIn(0, 255)
+            invalidateOutline()
+            invalidate()
+        }
+
+        fun hitRect(out: Rect) {
+            val g = geo
+            val x = g.x + dragX
+            val y = g.y + dragY
+            out.set(x.toInt(), y.toInt(), (x + g.w).toInt(), (y + g.h).toInt())
+            val grow = if (g.c > 0.5f) 0 else dp(if (g.b > 0.5f) 8 else 6)
+            out.inset(-grow, -grow)
+        }
+
+        // Drawing
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            body.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0xFF16171C.toInt(), Color.BLACK, Shader.TileMode.CLAMP)
-            rim.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0x40FFFFFF, 0x0DFFFFFF, Shader.TileMode.CLAMP)
+            gloss.shader = LinearGradient(0f, 0f, 0f, h * 0.45f, 0x24FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+            cardRim.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0x47FFFFFF, 0x0FFFFFFF, Shader.TileMode.CLAMP)
+            // The shape's target may depend on the height (card stack).
+            retargetPending = true
+            apply()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val g = geo
+            clip.roundOut(clipInt)
+            if (g.c > 0.001f) {
+                val b = blur
+                if (b != null) {
+                    b.setCornerRadius(g.r)
+                    b.setBounds(clipInt.left, clipInt.top, clipInt.right, clipInt.bottom)
+                    b.draw(canvas)
+                } else {
+                    fill.alpha = (0xE6 * g.c).toInt()
+                    canvas.drawRoundRect(clip, g.r, g.r, fill)
+                }
+                gloss.alpha = (255 * g.c).toInt().coerceIn(0, 255)
+                canvas.drawRoundRect(clip, g.r, g.r, gloss)
+            }
+        }
+
+        override fun dispatchDraw(canvas: Canvas) {
+            super.dispatchDraw(canvas)
+            val g = geo
+            // Touch glow (cards only): a faint light under the finger.
+            if (config.touchGlow && glowAlpha > 0.01f && g.c > 0.9f) {
+                val radius = g.w * 0.32f
+                val a = (glowAlpha * 255).toInt().coerceIn(0, 255)
+                val ac = activity.accent
+                touchGlow.shader = RadialGradient(
+                    touchX, touchY, radius,
+                    intArrayOf(Color.argb((a * 0.12f).toInt(), 255, 255, 255),
+                        Color.argb((a * 0.10f).toInt(), Color.red(ac), Color.green(ac), Color.blue(ac)),
+                        Color.TRANSPARENT),
+                    floatArrayOf(0f, 0.4f, 1f), Shader.TileMode.CLAMP)
+                canvas.drawCircle(touchX, touchY, radius, touchGlow)
+            }
+            // Black skin: the pill / bubble body, fading into glass as it becomes a card.
+            val skinA = 1f - smooth(g.c, 0f, 0.6f)
+            if (skinA > 0f && g.h != shaderH) {
+                shaderH = g.h
+                skin.shader = LinearGradient(0f, 0f, 0f, g.h, 0xFF16171C.toInt(), Color.BLACK, Shader.TileMode.CLAMP)
+                pillRim.shader = LinearGradient(0f, 0f, 0f, g.h, 0x40FFFFFF, 0x0DFFFFFF, Shader.TileMode.CLAMP)
+            }
+            if (skinA > 0f) {
+                skin.alpha = (255 * skinA).toInt()
+                canvas.drawRoundRect(clip, g.r, g.r, skin)
+            }
+            // Pill and bubble contents, gone as soon as it starts becoming a card.
+            val small = 1f - smooth(g.c, 0f, 0.25f)
+            val bubbleA = g.b.coerceIn(0f, 1f) * small
+            val pillA = (1f - g.b).coerceIn(0f, 1f) * small
+            if (pillA > 0.01f) drawPill(canvas, g, pillA)
+            if (bubbleA > 0.01f) drawBubble(canvas, g, bubbleA)
+            // Rims: thin on the pill, glassy on the card.
+            if (skinA > 0f) {
+                pillRim.alpha = (255 * skinA).toInt()
+                val i = pillRim.strokeWidth / 2f
+                canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, pillRim)
+            }
+            if (g.c > 0f) {
+                cardRim.alpha = (255 * g.c).toInt().coerceIn(0, 255)
+                val i = cardRim.strokeWidth / 2f
+                canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, cardRim)
+            }
+        }
+
+        private fun drawPill(canvas: Canvas, g: Geo, alpha: Float) {
+            val h = g.h
+            val a255 = (255 * alpha).toInt()
+            // Left: album art, or the activity's icon in a disc.
+            val lead = h - dp(10)
+            val leadLeft = dp(5).toFloat()
+            val leadTop = (h - lead) / 2f
+            if (kind == IslandKind.MEDIA) {
+                drawArt(canvas, activity.art, leadLeft, leadTop, lead, dp(7).toFloat(), a255)
+            } else {
+                drawDisc(canvas, leadLeft + lead / 2f, h / 2f, lead / 2f, a255)
+            }
+            // Right: sound bars for media, the live value for the others.
+            if (kind == IslandKind.MEDIA) {
+                barPaint.color = activity.accent
+                barPaint.alpha = a255
+                val barW = dp(3).toFloat()
+                val gap = dp(2) + dp(1) / 2f
+                val maxH = dp(16).toFloat()
+                var x = g.w - dp(14) - (barW * 4 + gap * 3)
+                val playing = activity.media?.isPlaying == true
+                for (i in 0 until 4) {
+                    val t = (barPhase + i * 0.2f) % 1f
+                    val s = if (playing) 0.35f + 0.65f * abs(1f - 2f * t) else 0.3f
+                    val bh = maxH * s
+                    tmpRect.set(x, h / 2f - bh / 2f, x + barW, h / 2f + bh / 2f)
+                    canvas.drawRoundRect(tmpRect, barW / 2f, barW / 2f, barPaint)
+                    x += barW + gap
+                }
+            } else {
+                valuePaint.color = valueColor()
+                valuePaint.alpha = a255
+                val baseline = h / 2f - (valuePaint.descent() + valuePaint.ascent()) / 2f
+                canvas.drawText(pillText, g.w - dp(13), baseline, valuePaint)
+            }
+        }
+
+        private fun drawBubble(canvas: Canvas, g: Geo, alpha: Float) {
+            val a255 = (255 * alpha).toInt()
+            val cx = g.w / 2f
+            val cy = g.h / 2f
+            if (kind == IslandKind.MEDIA) {
+                val s = min(g.w, g.h) - dp(10)
+                drawArt(canvas, activity.art, cx - s / 2f, cy - s / 2f, s, dp(6).toFloat(), a255)
+            } else {
+                Glyphs.draw(canvas, kind.glyph(), cx, cy, dp(16).toFloat(), glyphColor(), a255)
+            }
+        }
+
+        private fun drawArt(canvas: Canvas, art: Bitmap?, x: Float, y: Float, s: Float, r: Float, a: Int) {
+            tmpRect.set(x, y, x + s, y + s)
+            if (art == null) {
+                discPaint.color = activity.accent
+                discPaint.alpha = a
+                canvas.drawRoundRect(tmpRect, r, r, discPaint)
+                return
+            }
+            canvas.save()
+            artClip.reset()
+            artClip.addRoundRect(tmpRect, r, r, Path.Direction.CW)
+            canvas.clipPath(artClip)
+            artPaint.alpha = a
+            canvas.drawBitmap(art, null, tmpRect, artPaint)
+            canvas.restore()
+        }
+
+        /** The round icon at the left of a pill. */
+        private fun drawDisc(canvas: Canvas, cx: Float, cy: Float, radius: Float, a: Int) {
+            val solid = kind == IslandKind.CALL
+            discPaint.color = if (solid) 0xFF22C55E.toInt() else activity.accent
+            discPaint.alpha = if (solid) a else (a * 0.18f).toInt()
+            canvas.drawCircle(cx, cy, radius, discPaint)
+            Glyphs.draw(canvas, kind.glyph(), cx, cy, radius * 1.15f, if (solid) Color.WHITE else activity.accent, a)
+        }
+
+        private fun valueColor(): Int = if (kind == IslandKind.STOPWATCH) Color.WHITE else activity.accent
+
+        private fun glyphColor(): Int = activity.accent
+
+        // Touch
+
+        override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+            if (role == Role.CARD) {
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        touchX = ev.x
+                        touchY = ev.y
+                        animateGlow(1f)
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        touchX = ev.x
+                        touchY = ev.y
+                        if (glowAlpha > 0.01f) invalidate()
+                    }
+                    MotionEvent.ACTION_UP,
+                    MotionEvent.ACTION_CANCEL -> animateGlow(0f)
+                }
+            }
+            return super.dispatchTouchEvent(ev)
+        }
+
+        override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+            if (leaving || moving) return true
+            // Pills and bubbles: never let the (invisible) card contents get the touch.
+            if (role != Role.CARD) return true
+            gesture.track(ev)
+            return gesture.mode != NONE
         }
 
         override fun onTouchEvent(ev: MotionEvent): Boolean {
-            if (leaving || expanded) return true
-            gesture.track(ev)
+            // A touch that starts while the shape is moving or leaving is ignored to its end.
+            if (ev.actionMasked == MotionEvent.ACTION_DOWN) ignoreTouch = leaving || moving
+            if (ignoreTouch || leaving) return true
+            if (ev.actionMasked != MotionEvent.ACTION_DOWN || !gesture.tracking || role != Role.CARD) {
+                gesture.track(ev)
+            }
+            when (role) {
+                Role.CARD -> onCardTouch(ev)
+                Role.MAIN -> onMainPillTouch(ev)
+                Role.RIGHT,
+                Role.LEFT -> onBubbleTouch(ev)
+            }
+            return true
+        }
+
+        private fun onMainPillTouch(ev: MotionEvent) {
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     settleAnimator?.cancel()
-                    animate().cancel()
-                    pivotX = width / 2f
-                    pivotY = height / 2f
-                    // Lifted under the finger, just a touch.
+                    pivotX = geo.w / 2f
+                    pivotY = geo.h / 2f
                     animate().scaleX(LIFT).scaleY(LIFT).setDuration(160).setInterpolator(decelerate).start()
                 }
-                MotionEvent.ACTION_MOVE -> {
+                MotionEvent.ACTION_MOVE ->
                     if (gesture.mode != NONE) {
-                        animate().cancel()
-                        follow()
+                        dragX = rubber(gesture.dx, dp(44).toFloat())
+                        dragY = if (gesture.dy < 0) rubber(gesture.dy, dp(20).toFloat()) else rubber(gesture.dy, dp(28).toFloat())
+                        apply()
                     }
-                }
                 MotionEvent.ACTION_UP -> {
                     val sideways = abs(gesture.dx) > abs(gesture.dy)
-                    val third = (this@MiraCLOIslandView.width / 3f).coerceAtLeast(dp(100).toFloat())
-                    val flick = abs(gesture.vx) > flingVelocity && abs(gesture.vx) > abs(gesture.vy)
+                    val flickX = abs(gesture.vx) > flingVelocity && abs(gesture.vx) > abs(gesture.vy)
                     when {
-                        // Swiped sideways far enough, or flicked: always hide.
-                        sideways && (abs(gesture.dx) > third || flick) ->
-                            dismissTo(if (gesture.dx + gesture.vx * 0.05f < 0) -1f else 1f)
-                        // Pulled down: open the app.
-                        !sideways && gesture.dy > dp(36) -> {
+                        // Up: close this pill.
+                        !sideways && (gesture.dy < -dp(22) || gesture.vy < -flingVelocity) -> {
                             subtleTick()
-                            openApp()
+                            unlift()
+                            host.onDismiss(key)
                         }
-                        // A tap (not a long press): open the card.
+                        // Down: open the app.
+                        !sideways && gesture.dy > dp(32) -> {
+                            subtleTick()
+                            unlift()
+                            host.onOpenApp(key)
+                        }
+                        // Sideways: swap with the round pill on that side.
+                        sideways && (abs(gesture.dx) > dp(36) || flickX) -> {
+                            val right = gesture.dx + gesture.vx * 0.05f > 0
+                            val other = (if (right) state.pills.getOrNull(1) else state.pills.getOrNull(2))?.key
+                            unlift()
+                            if (other != null && host.onSwap(key, other)) {
+                                subtleTick()
+                                releaseDrag(animated = true)
+                            } else {
+                                settle()
+                            }
+                        }
                         gesture.mode == NONE && gesture.heldMs < longPressMs -> {
-                            resetTransform()
-                            setExpanded(true)
+                            unlift()
+                            host.onTapPill(key)
                         }
                         else -> settle()
                     }
                 }
                 MotionEvent.ACTION_CANCEL -> settle()
             }
-            return true
         }
 
-        /** Follows the finger: sideways one to one (so it can be swiped off), down with resistance. */
-        private fun follow() {
-            translationX = gesture.dx
-            translationY =
-                if (gesture.dy >= 0) rubber(gesture.dy, (pillDragRoom - dp(12)).toFloat())
-                else -rubber(-gesture.dy, dp(8).toFloat())
-            // A hint of stretch in the direction of the pull.
-            val pull = min(1f, (abs(gesture.dx) + abs(gesture.dy)) / dp(260))
-            val horizontal = abs(gesture.dx) >= abs(gesture.dy)
-            scaleX = LIFT + if (horizontal) 0.025f * pull else -0.015f * pull
-            scaleY = LIFT + if (horizontal) -0.02f * pull else 0.03f * pull
-        }
-
-        private fun resetTransform() {
-            animate().cancel()
-            translationX = 0f
-            translationY = 0f
-            scaleX = 1f
-            scaleY = 1f
-        }
-
-        /** Back home with a gentle spring. */
-        private fun settle() {
-            if (abs(translationX) > dp(6) || abs(translationY) > dp(6)) subtleTick()
-            val sx = translationX
-            val sy = translationY
-            val ssx = scaleX
-            val ssy = scaleY
-            settleAnimator?.cancel()
-            settleAnimator =
-                ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 420
-                    interpolator = softSpring
-                    addUpdateListener {
-                        val f = it.animatedValue as Float
-                        translationX = lerp(sx, 0f, f)
-                        translationY = lerp(sy, 0f, f)
-                        scaleX = lerp(ssx, 1f, f)
-                        scaleY = lerp(ssy, 1f, f)
-                    }
-                    start()
-                }
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            val w = width.toFloat()
-            val h = height.toFloat()
-            val r = h / 2f
-
-            // Body: glossy black, like the camera cut-out it sits on.
-            rect.set(0f, 0f, w, h)
-            canvas.drawRoundRect(rect, r, r, body)
-            rect.inset(rim.strokeWidth, rim.strokeWidth)
-            canvas.drawRoundRect(rect, r, r, rim)
-
-            // Album art on the left.
-            val a = art
-            val artSize = h - dp(10)
-            val artLeft = dp(6).toFloat()
-            val artTop = (h - artSize) / 2f
-            rect.set(artLeft, artTop, artLeft + artSize, artTop + artSize)
-            if (a != null) {
-                canvas.save()
-                artClip.reset()
-                artClip.addRoundRect(rect, dp(7).toFloat(), dp(7).toFloat(), Path.Direction.CW)
-                canvas.clipPath(artClip)
-                canvas.drawBitmap(a, null, rect, artPaint)
-                canvas.restore()
-            }
-
-            // Sound bars on the right.
-            bar.color = accent
-            val barW = dp(3).toFloat()
-            val gap = dp(2).toFloat() + dp(1).toFloat() / 2f
-            val maxH = dp(16).toFloat()
-            var x = w - dp(14) - (barW * 4 + gap * 3)
-            for (i in 0 until 4) {
-                val t = (phase + i * 0.2f) % 1f
-                val scale = if (playing) 0.35f + 0.65f * abs(1f - 2f * t) else 0.3f
-                val bh = maxH * scale
-                rect.set(x, h / 2f - bh / 2f, x + barW, h / 2f + bh / 2f)
-                canvas.drawRoundRect(rect, barW / 2f, barW / 2f, bar)
-                x += barW + gap
+        private fun onBubbleTouch(ev: MotionEvent) {
+            if (ev.actionMasked == MotionEvent.ACTION_UP &&
+                gesture.mode == NONE &&
+                gesture.heldMs < longPressMs
+            ) {
+                host.onTapPill(key)
             }
         }
-    }
 
-    // The glow behind the card ----------------------------------------------------------------------
-
-    /** Ambient glow behind the expanded card, coloured from the album art. Drawn once, then moved. */
-    private inner class AuraView(context: Context) : View(context) {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var c1 = DEFAULT_ACCENT
-        private var c2 = DEFAULT_ACCENT
-
-        init {
-            setRenderEffect(RenderEffect.createBlurEffect(dp(30).toFloat(), dp(30).toFloat(), Shader.TileMode.DECAL))
-        }
-
-        /**
-         * Take no space of its own: the window wraps its content, and a plain View asked to "match
-         * parent" there would report the whole screen, making the window cover the screen. The
-         * FrameLayout then sizes it to the window.
-         */
-        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val w = if (MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.EXACTLY)
-                MeasureSpec.getSize(widthMeasureSpec) else 0
-            val h = if (MeasureSpec.getMode(heightMeasureSpec) == MeasureSpec.EXACTLY)
-                MeasureSpec.getSize(heightMeasureSpec) else 0
-            setMeasuredDimension(w, h)
-        }
-
-        fun colors(art: Int, accent: Int) {
-            c1 = art
-            c2 = accent
-            invalidate()
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            // Around where the card rests (the card's movement is applied as a translation).
-            val l = card.left.toFloat()
-            val t = card.top.toFloat()
-            val w = card.width.toFloat()
-            val h = card.height.toFloat()
-            if (w <= 0f || h <= 0f) return
-            paint.shader = RadialGradient(l + w * 0.28f, t + h * 0.35f, w * 0.45f,
-                (c1 and 0x00FFFFFF) or 0x40000000, 0, Shader.TileMode.CLAMP)
-            canvas.drawCircle(l + w * 0.28f, t + h * 0.35f, w * 0.45f, paint)
-            paint.shader = RadialGradient(l + w * 0.72f, t + h * 0.7f, w * 0.45f,
-                (c2 and 0x00FFFFFF) or 0x33000000, 0, Shader.TileMode.CLAMP)
-            canvas.drawCircle(l + w * 0.72f, t + h * 0.7f, w * 0.45f, paint)
-        }
-    }
-
-    // The card --------------------------------------------------------------------------------------
-
-    /**
-     * The expanded card. [morph] runs from 0 (exactly the pill: same place, size and black) to 1
-     * (the frosted card below the camera). The shape is an outline clip, so morphing only moves the
-     * clip and a translation; nothing is re-laid out.
-     */
-    private inner class CardView(context: Context) : FrameLayout(context) {
-        var accent = DEFAULT_ACCENT
-        var morph = 1f
-            private set
-        var dragX = 0f
-        var dragY = 0f
-        private val clip = RectF()
-        private var clipRadius = cardRadius
-        private val clipInt = Rect()
-        private val glossPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE6141519.toInt() }
-        private val skin = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK }
-        private val rim = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-        private val touchGlow = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var blur: BackgroundBlurDrawable? = null
-        private var touchX = 0f
-        private var touchY = 0f
-        private var glowAlpha = 0f
-        private var glowAnimator: ValueAnimator? = null
-        private var settleAnimator: ValueAnimator? = null
-        private val gesture = Gesture()
-
-        init {
-            setWillNotDraw(false)
-            outlineProvider =
-                object : ViewOutlineProvider() {
-                    override fun getOutline(view: View, outline: Outline) {
-                        clip.roundOut(clipInt)
-                        outline.setRoundRect(clipInt, clipRadius)
-                    }
-                }
-            clipToOutline = true
-            rim.strokeWidth = dp(1).toFloat()
-        }
-
-        override fun onAttachedToWindow() {
-            super.onAttachedToWindow()
-            // Real frosted glass: blur what is behind the card (cross-window blur).
-            blur =
-                viewRootImpl?.createBackgroundBlurDrawable()?.apply {
-                    setBlurRadius(dp(36))
-                    setColor(0x8C141519.toInt())
-                }
-        }
-
-        override fun onDetachedFromWindow() {
-            stop()
-            super.onDetachedFromWindow()
-        }
-
-        fun stop() {
-            glowAnimator?.cancel()
-            settleAnimator?.cancel()
-        }
-
-        fun setBlurAlpha(a: Float) {
-            blur?.alpha = (255 * a).toInt().coerceIn(0, 255)
-        }
-
-        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-            super.onSizeChanged(w, h, oldw, oldh)
-            rim.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0x47FFFFFF, 0x0FFFFFFF, Shader.TileMode.CLAMP)
-            glossPaint.shader = LinearGradient(0f, 0f, 0f, h * 0.45f, 0x24FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
-            applyMorph(morph)
-        }
-
-        /** Places the shape for [p] (0 = pill, 1 = card), plus any drag offset. */
-        fun applyMorph(p: Float) {
-            morph = p
-            val w = width.toFloat()
-            val h = height.toFloat()
-            if (w <= 0f || h <= 0f) return
-            val pw = min(pillW.toFloat(), w)
-            clip.left = lerp((w - pw) / 2f, 0f, p)
-            clip.right = w - clip.left
-            clip.top = 0f
-            clip.bottom = lerp(pillH.toFloat(), h, p)
-            clipRadius = lerp(pillH / 2f, cardRadius, p)
-
-            // From the pill's place on the status bar down to below the camera.
-            val startY = (pillTop() - top).toFloat()
-            translationY = lerp(startY, 0f, p) + dragY
-            translationX = dragX
-            elevation = dp(14) * p
-
-            content.alpha = smooth(p, 0.5f, 1f)
-            content.translationY = lerp(-dp(10).toFloat(), 0f, smooth(p, 0.35f, 1f))
-
-            aura.alpha = smooth(p, 0.25f, 1f)
-            aura.translationX = translationX
-            aura.translationY = translationY
-            // The pill stays on top and fades away as the card starts to grow (and back).
-            pill.alpha = 1f - smooth(p, 0f, 0.22f)
-
-            invalidateOutline()
-            invalidate()
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            clip.roundOut(clipInt)
-            val b = blur
-            if (b != null) {
-                b.setCornerRadius(clipRadius)
-                b.setBounds(clipInt.left, clipInt.top, clipInt.right, clipInt.bottom)
-                b.draw(canvas)
-            } else {
-                canvas.drawRoundRect(clip, clipRadius, clipRadius, fill)
-            }
-            glossPaint.alpha = (255 * morph).toInt().coerceIn(0, 255)
-            canvas.drawRoundRect(clip, clipRadius, clipRadius, glossPaint)
-        }
-
-        override fun dispatchDraw(canvas: Canvas) {
-            super.dispatchDraw(canvas)
-            // Glow under the finger: a faint light, never a flash.
-            if (glowAlpha > 0.01f) {
-                val radius = width * 0.3f
-                val a = (glowAlpha * 255).toInt().coerceIn(0, 255)
-                touchGlow.shader = RadialGradient(
-                    touchX, touchY, radius,
-                    intArrayOf(Color.argb((a * 0.08f).toInt(), 255, 255, 255),
-                        Color.argb((a * 0.06f).toInt(), Color.red(accent), Color.green(accent), Color.blue(accent)),
-                        Color.TRANSPARENT),
-                    floatArrayOf(0f, 0.4f, 1f), Shader.TileMode.CLAMP)
-                canvas.drawCircle(touchX, touchY, radius, touchGlow)
-            }
-            // Black "pill skin" while it is still (or again) mostly the pill.
-            val skinAlpha = 1f - smooth(morph, 0f, 0.6f)
-            if (skinAlpha > 0f) {
-                skin.alpha = (255 * skinAlpha).toInt().coerceIn(0, 255)
-                canvas.drawRoundRect(clip, clipRadius, clipRadius, skin)
-            }
-            // Glass rim
-            rim.alpha = (255 * morph).toInt().coerceIn(0, 255)
-            val inset = rim.strokeWidth / 2f
-            canvas.drawRoundRect(clip.left + inset, clip.top + inset, clip.right - inset,
-                clip.bottom - inset, clipRadius, clipRadius, rim)
-        }
-
-        private fun busy() = leaving || morphAnimator != null || !expanded
-
-        override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
-            when (ev.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    touchX = ev.x
-                    touchY = ev.y
-                    animateGlow(1f)
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    touchX = ev.x
-                    touchY = ev.y
-                    if (glowAlpha > 0.01f) invalidate()
-                }
-                MotionEvent.ACTION_UP,
-                MotionEvent.ACTION_CANCEL -> animateGlow(0f)
-            }
-            return super.dispatchTouchEvent(ev)
-        }
-
-        /** Take over from the buttons once the finger clearly moves (a swipe, not a tap). */
-        override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
-            if (busy()) return true
-            gesture.track(ev)
-            return gesture.mode != NONE
-        }
-
-        override fun onTouchEvent(ev: MotionEvent): Boolean {
-            if (busy()) return true
-            // Events reaching here directly (empty area) are not yet tracked by intercept.
-            if (ev.actionMasked != MotionEvent.ACTION_DOWN || !gesture.tracking) gesture.track(ev)
+        private fun onCardTouch(ev: MotionEvent) {
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> settleAnimator?.cancel()
-                MotionEvent.ACTION_MOVE -> drag()
-                MotionEvent.ACTION_UP -> release()
+                MotionEvent.ACTION_MOVE ->
+                    when (gesture.mode) {
+                        SIDEWAYS -> {
+                            dragX = rubber(gesture.dx, dp(16).toFloat())
+                            apply()
+                        }
+                        DOWN -> {
+                            dragY = rubber(gesture.dy, dp(20).toFloat())
+                            apply()
+                        }
+                        UP -> {
+                            dragY = rubber(gesture.dy, dp(24).toFloat())
+                            apply()
+                        }
+                    }
+                MotionEvent.ACTION_UP ->
+                    when {
+                        gesture.mode == NONE ->
+                            // A tap where there is no button opens the app; a long press only glows.
+                            if (gesture.heldMs < longPressMs) {
+                                subtleTick()
+                                host.onOpenApp(key)
+                            }
+                        gesture.mode == UP && (gesture.dy < -dp(40) || gesture.vy < -flingVelocity) -> {
+                            releaseDrag(animated = true)
+                            host.onCollapseAll()
+                        }
+                        else -> settle()
+                    }
                 MotionEvent.ACTION_CANCEL -> settle()
             }
-            return true
         }
 
-        private fun drag() {
-            when (gesture.mode) {
-                SIDEWAYS -> {
-                    dragX = rubberSigned(gesture.dx, dp(16).toFloat())
-                    applyMorph(morph)
-                }
-                DOWN -> {
-                    dragY = rubber(gesture.dy, dp(20).toFloat())
-                    applyMorph(morph)
-                }
-                // Swipe up: the card turns back into the pill under the finger.
-                UP -> applyMorph(1f - (-gesture.dy / collapseRange()).coerceIn(0f, 1f))
-            }
+        private fun unlift() {
+            animate().scaleX(1f).scaleY(1f).setDuration(220).setInterpolator(decelerate).start()
         }
 
-        private fun collapseRange() = height * 0.9f + dp(40)
-
-        private fun release() {
-            when (gesture.mode) {
-                // Tap where there is no button: open the app. A long press only shows the glow.
-                NONE ->
-                    if (gesture.heldMs < longPressMs) {
-                        subtleTick()
-                        openApp()
-                    }
-                UP ->
-                    if (morph < 0.75f || gesture.vy < -flingVelocity) {
-                        setExpanded(false)
-                    } else {
-                        animateMorph(1f, EXPAND_MS, decelerate)
-                    }
-                else -> settle()
-            }
+        /** Hands the drag offset over to the shape's own movement. */
+        private fun releaseDrag(animated: Boolean) {
+            // Fold the finger offset into the shape so the next move starts exactly here.
+            geo = geo.copy(x = geo.x + dragX, y = geo.y + dragY)
+            dragX = 0f
+            dragY = 0f
+            if (!animated) apply()
         }
 
         /** Back in place with a gentle spring. */
         private fun settle() {
+            unlift()
             if (abs(dragX) > dp(4) || abs(dragY) > dp(4)) subtleTick()
             val sx = dragX
             val sy = dragY
@@ -1262,13 +1115,14 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                         val f = it.animatedValue as Float
                         dragX = lerp(sx, 0f, f)
                         dragY = lerp(sy, 0f, f)
-                        applyMorph(morph)
+                        apply()
                     }
                     start()
                 }
         }
 
         private fun animateGlow(target: Float) {
+            if (!config.touchGlow) return
             glowAnimator?.cancel()
             glowAnimator =
                 ValueAnimator.ofFloat(glowAlpha, target).apply {
@@ -1280,69 +1134,608 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                     start()
                 }
         }
+
+        fun sendAction(action: IslandAction) {
+            subtleTick()
+            host.onAction(key, action)
+        }
+
+        fun openApp() = host.onOpenApp(key)
     }
 
-    // Progress line ---------------------------------------------------------------------------------
+    private fun lighten(color: Int): Int {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(color, hsv)
+        hsv[0] = (hsv[0] + 28f) % 360f
+        return Color.HSVToColor(hsv)
+    }
 
-    /** Thin progress line with a white played part. Drag it to move through the song. */
-    private inner class ProgressLine(context: Context) : View(context) {
-        var fraction = 0f
+    private fun IslandKind.glyph(): Glyphs.Glyph =
+        when (this) {
+            IslandKind.CALL -> Glyphs.Glyph.PHONE
+            IslandKind.TIMER -> Glyphs.Glyph.HOURGLASS
+            IslandKind.STOPWATCH -> Glyphs.Glyph.STOPWATCH
+            IslandKind.MEDIA -> Glyphs.Glyph.NOTE
+        }
+
+    // Glow behind a card ---------------------------------------------------------------------------
+
+    /** Coloured glow behind a card. Drawn once (blurred), then only moved and faded. */
+    private inner class AuraView(context: Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var c1 = 0
+        private var c2 = 0
+        var cardHeight = 0f
             set(value) {
-                field = value
-                invalidate()
-            }
-        var seekable = false
-        var dragging = false
-            private set
-        private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x2EFFFFFF }
-        private val played = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-        private val rect = RectF()
-
-        override fun onTouchEvent(ev: MotionEvent): Boolean {
-            if (!seekable || durationMs <= 0L) return false
-            val f = (ev.x / width.coerceAtLeast(1)).coerceIn(0f, 1f)
-            when (ev.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    parent?.requestDisallowInterceptTouchEvent(true)
-                    dragging = true
-                    preview(f)
-                }
-                MotionEvent.ACTION_MOVE -> preview(f)
-                MotionEvent.ACTION_UP -> {
-                    preview(f)
-                    mediaController?.transportControls?.seekTo((f * durationMs).toLong())
-                    dragging = false
+                // Redraw only when the card height really changes (not every frame of a move).
+                if (abs(field - value) > dp(24)) {
+                    field = value
                     invalidate()
                 }
-                MotionEvent.ACTION_CANCEL -> {
-                    dragging = false
-                    updateProgress()
+            }
+
+        init {
+            setRenderEffect(RenderEffect.createBlurEffect(dp(30).toFloat(), dp(30).toFloat(), Shader.TileMode.DECAL))
+            alpha = 0f
+        }
+
+        fun colors(a: Int, b: Int) {
+            if (a == c1 && b == c2) return
+            c1 = a
+            c2 = b
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val m = auraMargin.toFloat()
+            val w = width - m * 2
+            val h = cardHeight.coerceIn(dp(68).toFloat(), height - m * 2)
+            paint.shader = RadialGradient(m + w * 0.25f, m + h * 0.35f, w * 0.42f,
+                (c1 and 0x00FFFFFF) or 0x8C000000.toInt(), 0, Shader.TileMode.CLAMP)
+            canvas.drawCircle(m + w * 0.25f, m + h * 0.35f, w * 0.42f, paint)
+            paint.shader = RadialGradient(m + w * 0.75f, m + h * 0.65f, w * 0.42f,
+                (c2 and 0x00FFFFFF) or 0x73000000, 0, Shader.TileMode.CLAMP)
+            canvas.drawCircle(m + w * 0.75f, m + h * 0.65f, w * 0.42f, paint)
+        }
+    }
+
+    // Card contents --------------------------------------------------------------------------------
+
+    private interface CardContent {
+        val view: View
+
+        fun bind(a: IslandActivity, stacked: Boolean)
+
+        /** Live updates while shown; true while it needs more ticks. */
+        fun tick(shown: Boolean): Boolean
+    }
+
+    /** Compact card (call, timer, stopwatch): icon, big live value, label, buttons. */
+    private inner class CompactContent(context: Context, private val item: Item) : CardContent {
+        private val row = LinearLayout(context)
+        override val view: View = row
+        private val lead = FrameLayout(context)
+        private val glyph = GlyphView(context)
+        private val avatar = ImageView(context)
+        private val initial = text(17f, Color.WHITE, 600)
+        private val big = text(26f, Color.WHITE, 600)
+        private val label = text(12f, 0x99FFFFFF.toInt(), 400)
+        private val buttons = LinearLayout(context)
+        private var activity: IslandActivity? = null
+        private var actionsKey: String? = null
+        private var lastBig = ""
+
+        init {
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.CENTER_VERTICAL
+            row.setPadding(dp(16), 0, dp(12), 0)
+            row.minimumHeight = compactH
+            avatar.scaleType = ImageView.ScaleType.CENTER_CROP
+            avatar.outlineProvider = ViewOutlineProvider.BACKGROUND
+            avatar.background = circle(0xFF475569.toInt())
+            avatar.clipToOutline = true
+            initial.gravity = Gravity.CENTER
+            lead.addView(glyph, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER))
+            lead.addView(avatar, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
+            lead.addView(initial, FrameLayout.LayoutParams(dp(40), dp(40), Gravity.CENTER))
+            row.addView(lead, LinearLayout.LayoutParams(dp(40), dp(40)))
+            val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(big)
+            texts.addView(label)
+            row.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(12)
+                marginEnd = dp(8)
+            })
+            buttons.orientation = LinearLayout.HORIZONTAL
+            buttons.gravity = Gravity.CENTER_VERTICAL
+            row.addView(buttons, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, compactH))
+        }
+
+        override fun bind(a: IslandActivity, stacked: Boolean) {
+            activity = a
+            val isCall = a.kind == IslandKind.CALL
+            glyph.visibility = if (isCall) GONE else VISIBLE
+            glyph.set(item.kind.glyph(), a.accent)
+            avatar.visibility = if (isCall && a.art != null) VISIBLE else GONE
+            avatar.setImageBitmap(a.art)
+            initial.visibility = if (isCall && a.art == null) VISIBLE else GONE
+            initial.background = circle(0xFF475569.toInt())
+            initial.text = a.title.firstOrNull()?.uppercase() ?: ""
+            if (isCall) {
+                big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                big.setTextColor(Color.WHITE)
+                big.text = a.title
+                label.setTextColor(a.accent)
+            } else {
+                big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26f)
+                big.setTextColor(if (a.kind == IslandKind.TIMER) a.accent else Color.WHITE)
+                label.setTextColor(0x99FFFFFF.toInt())
+                label.text = a.title
+            }
+            lastBig = ""
+            update()
+            bindButtons(a)
+        }
+
+        private fun bindButtons(a: IslandActivity) {
+            val k = a.actions.joinToString { "${it.label}|${it.style}|${it.icon != null}" } + "|${a.accent}"
+            if (k == actionsKey) {
+                // Same buttons: just point them at the new intents.
+                a.actions.forEachIndexed { i, action ->
+                    buttons.getChildAt(i)?.setOnClickListener { item.sendAction(action) }
                 }
+                return
+            }
+            actionsKey = k
+            buttons.removeAllViews()
+            a.actions.forEachIndexed { i, action ->
+                val b = actionButton(action, a.accent)
+                b.setOnClickListener { item.sendAction(action) }
+                buttons.addView(b, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(42)).apply {
+                    if (i > 0) marginStart = dp(8)
+                })
+            }
+        }
+
+        private fun actionButton(action: IslandAction, accent: Int): View {
+            val bg =
+                when (action.style) {
+                    IslandAction.Style.PRIMARY -> accent
+                    IslandAction.Style.DANGER -> 0xFFEF4444.toInt()
+                    IslandAction.Style.NEUTRAL -> 0x29FFFFFF
+                }
+            val fg = if (action.style == IslandAction.Style.PRIMARY && isLight(accent)) 0xFF111111.toInt() else Color.WHITE
+            return if (action.style == IslandAction.Style.DANGER || action.icon != null) {
+                ImageButton(context).apply {
+                    background = circle(bg)
+                    minimumWidth = dp(42)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setPadding(dp(11), dp(11), dp(11), dp(11))
+                    if (action.style == IslandAction.Style.DANGER && action.icon == null) {
+                        setImageDrawable(GlyphDrawable(Glyphs.Glyph.END_CALL, fg))
+                    } else {
+                        setImageDrawable(action.icon?.mutate())
+                        imageTintList = ColorStateList.valueOf(fg)
+                    }
+                    contentDescription = action.label
+                }
+            } else {
+                TextView(context).apply {
+                    text = action.label
+                    setTextColor(fg)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+                    gravity = Gravity.CENTER
+                    maxLines = 1
+                    setPadding(dp(14), 0, dp(14), 0)
+                    background = roundRect(bg, dp(21).toFloat())
+                    isClickable = true
+                }
+            }
+        }
+
+        private fun update() {
+            val a = activity ?: return
+            val clock = a.clock
+            val value =
+                when {
+                    clock != null -> IslandClock.format(clock.millis(), a.kind == IslandKind.STOPWATCH)
+                    else -> a.subtitle?.toString().orEmpty()
+                }
+            if (a.kind == IslandKind.CALL) {
+                if (value != lastBig) {
+                    lastBig = value
+                    label.text = value
+                }
+            } else if (value != lastBig) {
+                lastBig = value
+                big.text = value
+            }
+        }
+
+        override fun tick(shown: Boolean): Boolean {
+            val running = activity?.clock?.running == true
+            if (shown && running) update()
+            return false
+        }
+    }
+
+    /** The full media card: header, one-line progress, controls, and (when alone) recently played. */
+    private inner class MediaContent(context: Context, private val item: Item) : CardContent {
+        private val column = LinearLayout(context)
+        override val view: View = column
+        private val art = roundedImage(dp(50), dp(12).toFloat())
+        private val title = text(17f, Color.WHITE, 600)
+        private val subtitle = text(14f, 0x9EFFFFFF.toInt(), 400)
+        private val appBadge = ImageView(context)
+        private val progress = ProgressLine(context)
+        private val elapsed = text(12f, 0xA8FFFFFF.toInt(), 400)
+        private val total = text(12f, 0xA8FFFFFF.toInt(), 400)
+        private val outputButton = controlButton()
+        private val prevButton = controlButton()
+        private val playButton = controlButton()
+        private val nextButton = controlButton()
+        private val customButton = controlButton()
+        private val recentRow = LinearLayout(context)
+        private val playIcon = PlayPauseDrawable()
+        private val prevIcon = SkipDrawable(forward = false)
+        private val nextIcon = SkipDrawable(forward = true)
+        private var data: MediaData? = null
+        private var controller: MediaController? = null
+        private var appIconKey: String? = null
+        private var durationMs = 0L
+        private var lastProgressUpdate = 0L
+
+        init {
+            column.orientation = LinearLayout.VERTICAL
+            column.setPadding(dp(20), dp(18), dp(20), dp(16))
+
+            val header = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            header.addView(art, LinearLayout.LayoutParams(dp(50), dp(50)))
+            val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+            texts.addView(title)
+            texts.addView(subtitle)
+            header.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(14)
+                marginEnd = dp(8)
+            })
+            appBadge.background = circle(Color.WHITE)
+            appBadge.setPadding(dp(6), dp(6), dp(6), dp(6))
+            appBadge.imageTintList = ColorStateList.valueOf(0xFF111111.toInt())
+            header.addView(appBadge, LinearLayout.LayoutParams(dp(28), dp(28)))
+            column.addView(header)
+
+            // One line: elapsed, the line (drag to seek), total.
+            val line = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            line.addView(elapsed, LinearLayout.LayoutParams(dp(40), LinearLayout.LayoutParams.WRAP_CONTENT))
+            line.addView(progress, LinearLayout.LayoutParams(0, dp(28), 1f).apply {
+                marginStart = dp(6)
+                marginEnd = dp(6)
+            })
+            total.gravity = Gravity.END
+            line.addView(total, LinearLayout.LayoutParams(dp(40), LinearLayout.LayoutParams.WRAP_CONTENT))
+            column.addView(line, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            })
+
+            val controls = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            outputButton.setImageDrawable(OutputDrawable())
+            outputButton.contentDescription = "Output device"
+            outputButton.setOnClickListener { openOutputSwitcher() }
+            prevButton.setImageDrawable(prevIcon)
+            nextButton.setImageDrawable(nextIcon)
+            playButton.setImageDrawable(playIcon)
+            playButton.imageTintList = null
+            playButton.setPadding(dp(14), dp(14), dp(14), dp(14))
+            playButton.background = circle(Color.WHITE)
+            playButton.elevation = dp(4).toFloat()
+            playButton.outlineAmbientShadowColor = Color.WHITE
+            playButton.outlineSpotShadowColor = Color.WHITE
+            val slots = listOf(outputButton, prevButton, playButton, nextButton, customButton)
+            slots.forEachIndexed { i, b ->
+                val s = if (b === playButton) dp(52) else dp(44)
+                controls.addView(b, LinearLayout.LayoutParams(s, s))
+                if (i < slots.size - 1) controls.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+            }
+            column.addView(controls, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(4)
+            })
+
+            recentRow.orientation = LinearLayout.HORIZONTAL
+            column.addView(recentRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(14)
+            })
+            recentRow.visibility = GONE
+        }
+
+        override fun bind(a: IslandActivity, stacked: Boolean) {
+            val d = a.media ?: return
+            val changedSession = data?.instanceId != d.instanceId
+            data = d
+            art.setImageBitmap(a.art)
+            title.text = d.song ?: ""
+            subtitle.text = d.artist ?: d.app ?: ""
+            val iconKey = d.packageName
+            if (iconKey != appIconKey) {
+                appIconKey = iconKey
+                appBadge.setImageIcon(d.appIcon)
+            }
+            val actions = d.semanticActions
+            bindControl(prevButton, prevIcon, actions?.prevOrCustom, "Previous")
+            bindControl(nextButton, nextIcon, actions?.nextOrCustom, "Next")
+            val playPause = actions?.playOrPause
+            playIcon.setPlaying(d.isPlaying == true, animate = playButton.isAttachedToWindow)
+            playButton.contentDescription = playPause?.contentDescription ?: "Play or pause"
+            playButton.isEnabled = playPause?.action != null
+            playButton.setOnClickListener {
+                val run = playPause?.action ?: return@setOnClickListener
+                run.run()
+                playIcon.setPlaying(!playIcon.playing, animate = true)
+            }
+            val custom = actions?.custom0
+            customButton.setImageDrawable(custom?.icon)
+            customButton.contentDescription = custom?.contentDescription ?: "App action"
+            customButton.setOnClickListener { custom?.action?.run() }
+            customButton.visibility = if (custom?.icon != null && custom.action != null) VISIBLE else INVISIBLE
+            if (changedSession) controller = null
+            // Recently played only when the music card is the only card (keeps the stack short).
+            bindRecents(if (stacked) emptyList() else a.recents)
+            updateProgress()
+        }
+
+        private var recentsKey: String? = null
+
+        private fun bindRecents(recents: List<MediaData>) {
+            val k = recents.joinToString { "${it.packageName}|${it.song}" }
+            if (k == recentsKey) return
+            recentsKey = k
+            recentRow.removeAllViews()
+            if (recents.isEmpty()) {
+                recentRow.visibility = GONE
+                return
+            }
+            recentRow.visibility = VISIBLE
+            val size = (cardWidth() - dp(40) - dp(10) * 3) / 4
+            for (i in 0 until 4) {
+                val r = recents.getOrNull(i)
+                val tile = roundedImage(size, dp(14).toFloat())
+                if (r != null) {
+                    tile.setImageIcon(r.artwork)
+                    tile.contentDescription = "Play ${r.song ?: r.app ?: ""}"
+                    tile.setOnClickListener {
+                        val resume = r.resumeAction
+                        if (resume != null) {
+                            resume.run()
+                        } else {
+                            try {
+                                r.clickIntent?.send()
+                            } catch (e: android.app.PendingIntent.CanceledException) {
+                                // The app is gone; nothing to open.
+                            }
+                        }
+                        host.onCollapseAll()
+                    }
+                } else {
+                    tile.visibility = INVISIBLE
+                }
+                recentRow.addView(tile, LinearLayout.LayoutParams(size, size).apply { if (i > 0) marginStart = dp(10) })
+            }
+        }
+
+        private fun bindControl(button: ImageButton, icon: SkipDrawable, action: MediaAction?, label: String) {
+            val enabled = action?.action != null
+            button.contentDescription = action?.contentDescription ?: label
+            button.isEnabled = enabled
+            icon.alpha = if (enabled) 255 else 80
+            button.setOnClickListener { action?.action?.run() }
+        }
+
+        private fun openOutputSwitcher() {
+            val d = data ?: return
+            val intent =
+                Intent(MediaOutputConstants.ACTION_LAUNCH_MEDIA_OUTPUT_DIALOG)
+                    .setPackage(context.packageName)
+                    .putExtra(MediaOutputConstants.EXTRA_PACKAGE_NAME, d.packageName)
+                    .putExtra(MediaOutputConstants.EXTRA_USER_HANDLE, UserHandle.of(d.userId))
+            d.token?.let { intent.putExtra(MediaOutputConstants.KEY_MEDIA_SESSION_TOKEN, it) }
+            context.sendBroadcast(intent)
+            host.onCollapseAll()
+        }
+
+        override fun tick(shown: Boolean): Boolean {
+            if (!shown) return false
+            val now = SystemClock.uptimeMillis()
+            if (now - lastProgressUpdate >= PROGRESS_INTERVAL_MS) {
+                lastProgressUpdate = now
+                updateProgress()
             }
             return true
         }
 
-        private fun preview(f: Float) {
-            fraction = f
-            elapsed.text = formatTime((f * durationMs).toLong())
+        private fun updateProgress() {
+            val d = data ?: return
+            val c = controller ?: d.token?.let { MediaController(context, it) }.also { controller = it }
+            val state = c?.playbackState
+            val duration = c?.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+            durationMs = duration
+            progress.seekable =
+                state != null && duration > 0L && (state.actions and PlaybackState.ACTION_SEEK_TO) != 0L
+            if (progress.dragging) return
+            if (state == null || duration <= 0L) {
+                progress.fraction = 0f
+                elapsed.text = ""
+                total.text = ""
+                return
+            }
+            var position = state.position
+            if (state.state == PlaybackState.STATE_PLAYING) {
+                val delta = SystemClock.elapsedRealtime() - state.lastPositionUpdateTime
+                position += (delta * state.playbackSpeed).toLong()
+            }
+            position = position.coerceIn(0L, duration)
+            progress.fraction = position.toFloat() / duration
+            elapsed.text = formatTime(position)
+            total.text = formatTime(duration)
         }
 
-        override fun onDraw(canvas: Canvas) {
-            // The line sits in the middle of the taller touch area; thicker while dragging.
-            val h = dp(if (dragging) 7 else 4).toFloat()
-            val top = (height - h) / 2f
-            val r = h / 2f
-            rect.set(0f, top, width.toFloat(), top + h)
-            canvas.drawRoundRect(rect, r, r, track)
-            rect.set(0f, top, width * fraction.coerceIn(0f, 1f), top + h)
-            if (rect.width() > 0f) canvas.drawRoundRect(rect, r, r, played)
+        private fun roundedImage(size: Int, radius: Float) =
+            ImageView(context).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                background = roundRect(0x33FFFFFF, radius)
+                outlineProvider =
+                    object : ViewOutlineProvider() {
+                        override fun getOutline(view: View, outline: Outline) {
+                            outline.setRoundRect(0, 0, view.width, view.height, radius)
+                        }
+                    }
+                clipToOutline = true
+                minimumWidth = size
+                minimumHeight = size
+            }
+
+        private fun controlButton() =
+            ImageButton(context).apply {
+                background = null
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                setPadding(dp(12), dp(12), dp(12), dp(12))
+                imageTintList = ColorStateList.valueOf(Color.WHITE)
+            }
+
+        /** Thin line with a glowing played part and a glowing tip. Drag it to seek. */
+        private inner class ProgressLine(context: Context) : View(context) {
+            var fraction = 0f
+                set(value) {
+                    field = value
+                    invalidate()
+                }
+            var seekable = false
+            var dragging = false
+                private set
+            private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x33FFFFFF }
+            private val playedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+            private val tipPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+            private val rect = RectF()
+
+            override fun onTouchEvent(ev: MotionEvent): Boolean {
+                if (!seekable || durationMs <= 0L) return false
+                val f = (ev.x / width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        dragging = true
+                        preview(f)
+                    }
+                    MotionEvent.ACTION_MOVE -> preview(f)
+                    MotionEvent.ACTION_UP -> {
+                        preview(f)
+                        controller?.transportControls?.seekTo((f * durationMs).toLong())
+                        dragging = false
+                        invalidate()
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        dragging = false
+                        updateProgress()
+                    }
+                }
+                return true
+            }
+
+            private fun preview(f: Float) {
+                fraction = f
+                elapsed.text = formatTime((f * durationMs).toLong())
+            }
+
+            override fun onDraw(canvas: Canvas) {
+                val h = dp(if (dragging) 6 else 3).toFloat()
+                val top = (height - h) / 2f
+                val r = h / 2f
+                rect.set(0f, top, width.toFloat(), top + h)
+                canvas.drawRoundRect(rect, r, r, trackPaint)
+                val x = width * fraction.coerceIn(0f, 1f)
+                rect.set(0f, top, x, top + h)
+                if (rect.width() > 0f) canvas.drawRoundRect(rect, r, r, playedPaint)
+                // Glowing tip.
+                val tip = dp(if (dragging) 7 else 4).toFloat()
+                tipPaint.shader = RadialGradient(x, height / 2f, tip * 2.4f,
+                    intArrayOf(0xCCFFFFFF.toInt(), 0x33FFFFFF, 0), floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP)
+                canvas.drawCircle(x, height / 2f, tip * 2.4f, tipPaint)
+            }
         }
     }
 
-    // Icons -----------------------------------------------------------------------------------------
+    // Icons --------------------------------------------------------------------------------------
+
+    /** Simple glyphs drawn from 24-unit path data, so they scale and tint cleanly. */
+    private object Glyphs {
+        enum class Glyph(val stroke: Boolean, val data: String) {
+            PHONE(false, "M6.6 3.5 9 6.9a1.6 1.6 0 0 1-.2 2l-1.2 1.2a12 12 0 0 0 6.3 6.3l1.2-1.2a1.6 1.6 0 0 1 2-.2l3.4 2.4a1.6 1.6 0 0 1 .3 2.3l-1.2 1.5c-.8 1-2.1 1.3-3.3.9A19 19 0 0 1 3.1 7.7c-.4-1.2 0-2.5.9-3.3l1.5-1.2a1.6 1.6 0 0 1 2.3.3z"),
+            END_CALL(false, "M3 14.5c5-4.6 13-4.6 18 0l-1.8 2.3a1.4 1.4 0 0 1-1.9.3l-2.4-1.6a1.4 1.4 0 0 1-.6-1.2v-1.6a12 12 0 0 0-4.6 0v1.6a1.4 1.4 0 0 1-.6 1.2l-2.4 1.6a1.4 1.4 0 0 1-1.9-.3z"),
+            HOURGLASS(true, "M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9"),
+            STOPWATCH(true, "M12 5a8 8 0 1 1 0 16a8 8 0 1 1 0-16zM12 13V9M10 2.5h4M18.5 6l1.5-1.5"),
+            NOTE(false, "M9 17.5V6l10-2v11.5a2.6 2.6 0 1 1-1.8-2.5V7.6L10.8 8.9v8.6a2.6 2.6 0 1 1-1.8-2.5z"),
+        }
+
+        private val paths = HashMap<Glyph, Path>()
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+        private val matrix = Matrix()
+        private val scaled = Path()
+
+        fun draw(canvas: Canvas, glyph: Glyph, cx: Float, cy: Float, size: Float, color: Int, alpha: Int) {
+            val src = paths.getOrPut(glyph) { PathParser.createPathFromPathData(glyph.data) }
+            val s = size / 24f
+            matrix.setScale(s, s)
+            matrix.postTranslate(cx - size / 2f, cy - size / 2f)
+            scaled.reset()
+            src.transform(matrix, scaled)
+            paint.color = color
+            paint.alpha = alpha
+            if (glyph.stroke) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2.2f * s
+            } else {
+                paint.style = Paint.Style.FILL
+            }
+            canvas.drawPath(scaled, paint)
+        }
+    }
+
+    private inner class GlyphView(context: Context) : View(context) {
+        private var glyph = Glyphs.Glyph.NOTE
+        private var color = Color.WHITE
+
+        fun set(g: Glyphs.Glyph, c: Int) {
+            if (g == glyph && c == color) return
+            glyph = g
+            color = c
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            Glyphs.draw(canvas, glyph, width / 2f, height / 2f, min(width, height).toFloat(), color, 255)
+        }
+    }
+
+    private inner class GlyphDrawable(private val glyph: Glyphs.Glyph, private val color: Int) : IconDrawable() {
+        override fun draw(canvas: Canvas) {
+            val b = bounds
+            Glyphs.draw(canvas, glyph, b.exactCenterX(), b.exactCenterY(), min(b.width(), b.height()).toFloat(), color, getAlpha())
+        }
+    }
 
     /** Base for the small drawn icons: no intrinsic size, so the button sizes them. */
-    private abstract class IconDrawable : Drawable() {
+    private abstract class IconDrawable : android.graphics.drawable.Drawable() {
         protected val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var alphaValue = 255
 
@@ -1353,20 +1746,20 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
         override fun getAlpha() = alphaValue
 
-        override fun setColorFilter(colorFilter: ColorFilter?) {
+        override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
             paint.colorFilter = colorFilter
             invalidateSelf()
         }
 
         @Deprecated("Deprecated in Java")
-        override fun getOpacity() = PixelFormat.TRANSLUCENT
+        override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
     }
 
     /** Play (triangle) and pause (two bars), switching with a short fade and scale. */
     private inner class PlayPauseDrawable : IconDrawable() {
         var playing = false
             private set
-        private var t = 0f // 0 = play shape, 1 = pause shape
+        private var t = 0f
         private var anim: ValueAnimator? = null
         private val path = Path()
 
@@ -1413,8 +1806,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             val cy = b.exactCenterY()
             paint.strokeWidth = s * 0.14f
             val base = getAlpha()
-
-            // Pause
             if (t > 0f) {
                 paint.alpha = (base * t).toInt()
                 val k = 0.75f + 0.25f * t
@@ -1424,7 +1815,6 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 canvas.drawRoundRect(cx - gap - bw, cy - bh / 2f, cx - gap, cy + bh / 2f, bw / 3f, bw / 3f, paint)
                 canvas.drawRoundRect(cx + gap, cy - bh / 2f, cx + gap + bw, cy + bh / 2f, bw / 3f, bw / 3f, paint)
             }
-            // Play
             if (t < 1f) {
                 paint.alpha = (base * (1f - t)).toInt()
                 val k = 0.75f + 0.25f * (1f - t)
@@ -1463,57 +1853,33 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             path.close()
             canvas.drawPath(path, paint)
             val barX = cx + d * s * 0.62f
-            canvas.drawRoundRect(barX - s * 0.1f, cy - s * 0.75f, barX + s * 0.1f, cy + s * 0.75f,
-                s * 0.1f, s * 0.1f, paint)
+            canvas.drawRoundRect(barX - s * 0.1f, cy - s * 0.75f, barX + s * 0.1f, cy + s * 0.75f, s * 0.1f, s * 0.1f, paint)
         }
     }
 
-    /** Audio output: a screen outline with a triangle below (the usual "play on" sign). */
+    /** Audio output: a phone and a speaker (as in the ColorOS media card). */
     private inner class OutputDrawable : IconDrawable() {
-        private val path = Path()
         private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
         }
-
-        init {
-            paint.color = Color.WHITE
-        }
+        private val r = RectF()
 
         override fun draw(canvas: Canvas) {
             val b = bounds
-            val s = min(b.width(), b.height()) / 2f * 0.66f
-            val cx = b.exactCenterX()
-            val cy = b.exactCenterY()
+            val s = min(b.width(), b.height()) / 24f
+            val ox = b.exactCenterX() - 12f * s
+            val oy = b.exactCenterY() - 12f * s
             stroke.alpha = getAlpha()
+            paint.color = Color.WHITE
             paint.alpha = getAlpha()
-            stroke.strokeWidth = s * 0.15f
-            val l = cx - s
-            val r = cx + s
-            val t = cy - s * 0.85f
-            val bottom = cy + s * 0.35f
-            val rad = s * 0.2f
-            // Screen outline, open at the bottom middle for the triangle.
-            path.reset()
-            path.moveTo(cx - s * 0.42f, bottom)
-            path.lineTo(l + rad, bottom)
-            path.quadTo(l, bottom, l, bottom - rad)
-            path.lineTo(l, t + rad)
-            path.quadTo(l, t, l + rad, t)
-            path.lineTo(r - rad, t)
-            path.quadTo(r, t, r, t + rad)
-            path.lineTo(r, bottom - rad)
-            path.quadTo(r, bottom, r - rad, bottom)
-            path.lineTo(cx + s * 0.42f, bottom)
-            canvas.drawPath(path, stroke)
-            path.reset()
-            path.moveTo(cx, cy + s * 0.05f)
-            path.lineTo(cx + s * 0.45f, cy + s * 0.95f)
-            path.lineTo(cx - s * 0.45f, cy + s * 0.95f)
-            path.close()
-            canvas.drawPath(path, paint)
+            stroke.strokeWidth = 1.7f * s
+            r.set(ox + 3f * s, oy + 3f * s, ox + 12f * s, oy + 19f * s)
+            canvas.drawRoundRect(r, 2f * s, 2f * s, stroke)
+            r.set(ox + 14.5f * s, oy + 7f * s, ox + 21f * s, oy + 20f * s)
+            canvas.drawRoundRect(r, 1.6f * s, 1.6f * s, stroke)
+            canvas.drawCircle(ox + 17.75f * s, oy + 15.5f * s, 1.5f * s, paint)
+            canvas.drawCircle(ox + 17.75f * s, oy + 10.2f * s, 0.9f * s, paint)
         }
     }
 
@@ -1523,9 +1889,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         private const val UP = 2
         private const val DOWN = 3
         private const val LIFT = 1.03f
-        private const val EXPAND_MS = 420L
-        private const val COLLAPSE_MS = 340L
-        private val DEFAULT_ACCENT = 0xFF34D399.toInt()
+        private const val TICK_MS = 100L
         private const val PROGRESS_INTERVAL_MS = 500L
         private const val AUTO_COLLAPSE_MS = 8000L
     }

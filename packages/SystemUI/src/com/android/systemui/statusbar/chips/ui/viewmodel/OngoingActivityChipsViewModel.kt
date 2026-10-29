@@ -217,6 +217,7 @@ constructor(
     /** MiraCLO: leaves out the chips the Dynamic Island already shows. */
     private val islandFilteredChipBundle =
         combine(incomingChipBundle, IslandChipFilter.state) { bundle, island ->
+            if (island.hideAll) return@combine ChipBundle()
             bundle.copy(
                 screenRecord =
                     if (island.hideScreenRecord) OngoingActivityChipModel.Inactive()

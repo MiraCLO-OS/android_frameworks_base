@@ -781,6 +781,19 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             invalidate()
         }
 
+        private val glassMatrix = Matrix()
+
+        /**
+         * The rim and gloss gradients are made for the full card; a pill or bubble is a smaller
+         * shape at the top-left of this view, so the gradients are scaled down onto it.
+         */
+        private fun fitGlassShaders(g: Geo) {
+            if (!config.glass || width <= 0 || height <= 0) return
+            glassMatrix.setScale(g.w / width, g.h / height)
+            cardRim.shader?.setLocalMatrix(glassMatrix)
+            gloss.shader?.setLocalMatrix(glassMatrix)
+        }
+
         private fun updateRimShaders(w: Int, h: Int) {
             if (config.glass) {
                 gloss.shader = LinearGradient(0f, 0f, 0f, h * 0.5f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
@@ -985,7 +998,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             aura.translationY = translationY - auraMargin
             aura.alpha = if (config.ambientGlow) smooth(g.c, 0.25f, 1f) * alpha else 0f
             aura.cardHeight = g.h
-            blur?.alpha = (255 * g.c).toInt().coerceIn(0, 255)
+            // Liquid Glass: pills and bubbles are glass too; otherwise only cards are.
+            blur?.alpha = if (config.glass) 255 else (255 * g.c).toInt().coerceIn(0, 255)
             invalidateOutline()
             invalidate()
         }
@@ -1019,17 +1033,20 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         override fun onDraw(canvas: Canvas) {
             val g = geo
             clip.roundOut(clipInt)
-            if (g.c > 0.001f) {
+            val glassPill = config.glass
+            if (g.c > 0.001f || glassPill) {
+                val surface = if (glassPill) 1f else g.c
+                fitGlassShaders(g)
                 val b = blur
                 if (b != null) {
                     b.setCornerRadius(g.r)
                     b.setBounds(clipInt.left, clipInt.top, clipInt.right, clipInt.bottom)
                     b.draw(canvas)
                 } else {
-                    fill.alpha = (0xE6 * g.c).toInt()
+                    fill.alpha = (0xE6 * surface).toInt()
                     canvas.drawRoundRect(clip, g.r, g.r, fill)
                 }
-                gloss.alpha = (255 * g.c).toInt().coerceIn(0, 255)
+                gloss.alpha = (255 * surface).toInt().coerceIn(0, 255)
                 canvas.drawRoundRect(clip, g.r, g.r, gloss)
             }
         }
@@ -1050,8 +1067,9 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                     floatArrayOf(0f, 0.4f, 1f), Shader.TileMode.CLAMP)
                 canvas.drawCircle(touchX, touchY, radius, touchGlow)
             }
-            // Black skin: the pill / bubble body, fading into glass as it becomes a card.
-            val skinA = 1f - smooth(g.c, 0f, 0.6f)
+            // Black skin: the pill / bubble body, fading into glass as it becomes a card. With
+            // Liquid Glass there is no skin: pills are the same glass as the cards.
+            val skinA = if (config.glass) 0f else 1f - smooth(g.c, 0f, 0.6f)
             if (skinA > 0f && g.h != shaderH) {
                 shaderH = g.h
                 skin.shader = LinearGradient(0f, 0f, 0f, g.h, 0xFF16171C.toInt(), Color.BLACK, Shader.TileMode.CLAMP)
@@ -1073,8 +1091,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 val i = pillRim.strokeWidth / 2f
                 canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, pillRim)
             }
-            if (g.c > 0f) {
-                cardRim.alpha = (255 * g.c).toInt().coerceIn(0, 255)
+            if (g.c > 0f || config.glass) {
+                cardRim.alpha = if (config.glass) 255 else (255 * g.c).toInt().coerceIn(0, 255)
                 val i = cardRim.strokeWidth / 2f
                 canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, cardRim)
             }

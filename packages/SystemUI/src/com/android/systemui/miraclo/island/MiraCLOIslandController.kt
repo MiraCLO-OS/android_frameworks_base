@@ -637,9 +637,9 @@ constructor(
                 .filter { isShown(it) }
                 .take(if (severalActivities) MAX_VISIBLE else 1)
         cards.retainAll { key -> visible.any { it.key == key } }
-        publishChipFilter(visible)
 
         val shown = statusBarShowing && !dozing && barState == StatusBarState.SHADE
+        publishChipFilter(visible, islandShowing = shown && !shadeOpen && visible.isNotEmpty())
         // Cards fold away while hidden or while the shade comes down over them.
         if (!shown || shadeOpen) cards.clear()
 
@@ -656,12 +656,13 @@ constructor(
     }
 
     /** The status bar leaves out the chips of what the island shows (see [IslandChipFilter]). */
-    private fun publishChipFilter(visible: List<IslandActivity>) {
+    private fun publishChipFilter(visible: List<IslandActivity>, islandShowing: Boolean = false) {
         IslandChipFilter.set(
             IslandChipFilter.State(
                 hideCall = visible.any { it.kind == IslandKind.CALL },
                 hideScreenRecord = visible.any { it.kind == IslandKind.SCREEN_RECORD },
                 notificationKeys = visible.map { it.key }.toSet(),
+                hideAll = islandShowing,
             )
         )
     }

@@ -19,6 +19,11 @@ object IslandChipFilter {
         val hideCall: Boolean = false,
         val hideScreenRecord: Boolean = false,
         val notificationKeys: Set<String> = emptySet(),
+        /**
+         * The island shows something right now: the status bar leaves out every chip, so its left
+         * side keeps only the clock (the island already shows what is going on).
+         */
+        val hideAll: Boolean = false,
     )
 
     private val _state = MutableStateFlow(State())

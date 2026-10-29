@@ -345,9 +345,11 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
     private fun publishStatusBarSpace() {
         if (released || !shownTarget || shadeFraction >= SHADE_HIDE_FRACTION) {
             IslandStatusBarSpace.request(IslandStatusBarSpace.NONE)
+            IslandStatusBarSpace.setActive(false)
             return
         }
         val live = { a: IslandActivity? -> a != null && items[a.key]?.leaving == false }
+        IslandStatusBarSpace.setActive(state.pills.any { live(it) } || state.cards.any { live(it) })
         val mode =
             when {
                 live(state.pills.getOrNull(1)) || live(state.pills.getOrNull(2)) -> IslandStatusBarSpace.SIDE_PILLS

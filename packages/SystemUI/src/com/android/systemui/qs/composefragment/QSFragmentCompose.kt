@@ -70,7 +70,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.approachLayout
 import androidx.compose.ui.layout.layout
@@ -403,10 +405,21 @@ constructor(
                 LocalMiraCLOQsStyle provides miracloQsStyle,
                 LocalMiraCLOLiquidGlass provides miracloLiquidGlass,
             ) {
+                // MiraCLO: without Liquid Glass the dark ColorOS QS is solid, with no blur: an
+                // opaque shade fades in behind it as QS expands (QQS and notifications untouched).
+                val miracloSolid =
+                    miracloQsStyle && !miracloLiquidGlass &&
+                        MaterialTheme.colorScheme.surface.luminance() < 0.5f
                 ProvideShortcutHelperIndication(interactionsConfig = interactionsConfig()) {
                     Box(
                         modifier =
                             modifier
+                                .thenIf(miracloSolid) {
+                                    Modifier.drawBehind {
+                                        val p = viewModel.expansionState.progress.coerceIn(0f, 1f)
+                                        if (p > 0f) drawRect(MiraCLOSolidShade, alpha = p)
+                                    }
+                                }
                                 .layout { measurable, constraints ->
                                     measurable.measure(constraints).run {
                                         layout(width, height) {
@@ -1759,6 +1772,9 @@ private fun AlwaysDarkMode(content: @Composable () -> Unit) {
         }
     }
 }
+
+/** MiraCLO: the solid dark shade behind the ColorOS QS when Liquid Glass is off. */
+private val MiraCLOSolidShade = Color(0xFF0B0C0F)
 
 /** MiraCLO: Settings.Secure key for the ColorOS-style Quick Settings layout (0 = off, 1 = on). */
 private const val MIRACLO_QS_STYLE = "miraclo_qs_style"

@@ -159,6 +159,10 @@ private val MiraCLOTileRim =
     Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f)))
 
 private val MiraCLOBlue = Color(0xFF1677FF)
+
+/** MiraCLO: solid tile colour of the dark QS without Liquid Glass. */
+internal val MiraCLOSolidTile = Color(0xFF1E1F23)
+private val MiraCLOSolidBubble = Color(0xFF2C2D32)
 private val MiraCLOGreen = Color(0xFF16A34A)
 private val MIRACLO_DATA_TILES = setOf("cell", "mobile_data", "mobiledata")
 
@@ -219,6 +223,7 @@ fun ContentScope.Tile(
 
         val miracloStyle = LocalMiraCLOQsStyle.current
         val liquidGlass = LocalMiraCLOLiquidGlass.current
+        val miracloLightPanel = MaterialTheme.colorScheme.surface.luminance() >= 0.5f
         val colors =
             if (miracloStyle) TileDefaults.miracloColorsForState(uiState, iconOnly, tile.spec.spec)
             else TileDefaults.getColorForState(uiState, iconOnly)
@@ -295,8 +300,11 @@ fun ContentScope.Tile(
                             if (liquidGlass) {
                                 Modifier.background(MiraCLOLiquidHighlight, tileShape)
                                     .border(width = 1.3.dp, brush = MiraCLOLiquidRim, shape = tileShape)
-                            } else {
+                            } else if (miracloLightPanel) {
                                 Modifier.border(width = 1.dp, brush = MiraCLOTileRim, shape = tileShape)
+                            } else {
+                                // Dark, no Liquid Glass: flat solid tiles, no rim.
+                                Modifier
                             }
                         }
                         .borderOnFocus(
@@ -707,10 +715,19 @@ private object TileDefaults {
         val accent = if (spec in MIRACLO_DATA_TILES) MiraCLOGreen else MiraCLOBlue
         val liquid = LocalMiraCLOLiquidGlass.current
         val glass =
-            if (darkPanel) Color.White.copy(alpha = if (liquid) 0.07f else 0.14f)
-            else Color.White.copy(alpha = if (liquid) 0.30f else 0.55f)
+            if (darkPanel) {
+                // Without Liquid Glass the dark panel is solid: opaque tiles, nothing shows through.
+                if (liquid) Color.White.copy(alpha = 0.07f) else MiraCLOSolidTile
+            } else {
+                Color.White.copy(alpha = if (liquid) 0.30f else 0.55f)
+            }
         val bubbleOff =
-            if (darkPanel) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.06f)
+            if (darkPanel) {
+                // The icon bubble of a wide tile stays a shade lighter than the tile itself.
+                if (liquid) Color.White.copy(alpha = 0.14f) else MiraCLOSolidBubble
+            } else {
+                Color.Black.copy(alpha = 0.06f)
+            }
         val bubbleOn = if (darkPanel) Color.White else accent
         val iconOn = if (darkPanel) accent else Color.White
         val secondary = onSurface.copy(alpha = 0.70f)

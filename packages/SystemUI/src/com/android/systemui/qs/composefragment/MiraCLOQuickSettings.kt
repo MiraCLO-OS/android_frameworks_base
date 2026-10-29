@@ -67,6 +67,7 @@ import com.android.systemui.qs.panels.ui.compose.infinitegrid.InfiniteGridLayout
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOLiquidGlass
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOLiquidHighlight
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOLiquidRim
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOSolidTile
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOColorOSGap
 import com.android.systemui.qs.panels.ui.viewmodel.TileViewModel
 import com.android.systemui.res.R
@@ -231,7 +232,7 @@ private fun miracloGlass(): MiraCLOGlass {
     val liquid = LocalMiraCLOLiquidGlass.current
     return MiraCLOGlass(
         fill =
-            if (dark) Color.White.copy(alpha = if (liquid) 0.07f else 0.14f)
+            if (dark) (if (liquid) Color.White.copy(alpha = 0.07f) else MiraCLOSolidTile)
             else Color.White.copy(alpha = if (liquid) 0.30f else 0.55f),
         iconOff = onSurface,
         accent = accent,
@@ -251,6 +252,9 @@ private fun Modifier.glassSurface(glass: MiraCLOGlass, shape: Shape): Modifier =
             .background(glass.fill, shape)
             .background(MiraCLOLiquidHighlight, shape)
             .border(1.3.dp, MiraCLOLiquidRim, shape)
+    } else if (glass.dark) {
+        // Dark, no Liquid Glass: flat solid surface, no rim.
+        this.clip(shape).background(glass.fill, shape)
     } else {
         this.clip(shape).background(glass.fill, shape).border(1.dp, MiraCLOGlassRim, shape)
     }

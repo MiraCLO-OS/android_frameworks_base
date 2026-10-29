@@ -83,6 +83,7 @@ public class PhoneStatusBarView extends FrameLayout {
     /** MiraCLO: the Dynamic Island's pills appeared, changed or left. */
     private final Runnable mIslandSpaceListener = this::applyIslandMode;
     private int mIslandMode = IslandStatusBarSpace.NONE;
+    private boolean mIslandActive;
 
     public PhoneStatusBarView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -385,11 +386,20 @@ public class PhoneStatusBarView extends FrameLayout {
      */
     private void applyIslandMode() {
         final int mode = IslandStatusBarSpace.mode();
-        if (mode == mIslandMode) return;
+        final boolean active = IslandStatusBarSpace.isActive();
+        if (mode == mIslandMode && active == mIslandActive) return;
+        final boolean activeChanged = active != mIslandActive;
+        final boolean modeChanged = mode != mIslandMode;
         mIslandMode = mode;
+        mIslandActive = active;
         final boolean hide = mode != IslandStatusBarSpace.NONE;
         // Notification icons and the status bar chips share this container; the clock does not.
-        fadeForIsland(findViewById(R.id.start_side_notif_and_chip_container), hide);
+        // They stay away whenever the island shows anything, cards included: the island already
+        // shows those activities, so the left side keeps only the time.
+        if (activeChanged) {
+            fadeForIsland(findViewById(R.id.start_side_notif_and_chip_container), active);
+        }
+        if (!modeChanged) return;
         // The network speed's holder is faded by other code, so fade the text inside it.
         fadeForIsland(findViewById(R.id.network_traffic), hide);
         StatusIconContainer icons = findViewById(R.id.statusIcons);

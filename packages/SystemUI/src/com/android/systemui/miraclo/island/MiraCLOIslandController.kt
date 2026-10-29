@@ -373,7 +373,17 @@ constructor(
                 }
             mainHandler.post {
                 if (packages == foregroundPackages) return@post
+                // The app the user just left is what they care about now: its activity comes
+                // back as the main pill, and the others move aside.
+                val leftApps = foregroundPackages - packages
                 foregroundPackages = packages
+                if (leftApps.isNotEmpty()) {
+                    val back = order.filter { activities[it]?.packageName in leftApps }
+                    if (back.isNotEmpty()) {
+                        order.removeAll(back.toSet())
+                        order.addAll(0, back)
+                    }
+                }
                 // Opening the app again brings its swiped-away activity back (once minimised).
                 dismissed.keys.removeAll { key -> activities[key]?.packageName in packages }
                 if (launchingPackage != null && launchingPackage in packages) launchingPackage = null

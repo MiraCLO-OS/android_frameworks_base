@@ -38,6 +38,21 @@ object IslandStatusBarSpace {
     /** The current mode: [NONE], [MAIN_PILL] or [SIDE_PILLS]. */
     @JvmStatic fun mode(): Int = current
 
+    private var active = false
+
+    /**
+     * Whether the island shows anything at all, pills or cards. While it does, the left side of
+     * the status bar keeps only the clock (no notification icons, no chips).
+     */
+    @JvmStatic fun isActive(): Boolean = active
+
+    /** Sets [isActive]; applies at once. */
+    fun setActive(value: Boolean) {
+        if (value == active) return
+        active = value
+        for (l in listeners.toList()) l.run()
+    }
+
     @JvmStatic
     fun addListener(listener: Runnable) {
         if (listener !in listeners) listeners.add(listener)

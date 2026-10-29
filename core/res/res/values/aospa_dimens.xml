@@ -30,6 +30,6 @@
     <dimen name="pocket_mode_instructions_step_margin_top">8dp</dimen>
 
     <!-- Status bar network traffic monitor -->
-    <dimen name="net_traffic_text_size">8sp</dimen>
+    <dimen name="net_traffic_text_size">12.5sp</dimen>
 
 </resources>

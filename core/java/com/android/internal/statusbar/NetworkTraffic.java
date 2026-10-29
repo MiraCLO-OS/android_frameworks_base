@@ -108,8 +108,13 @@ public class NetworkTraffic extends TextView {
 
         final Resources resources = getResources();
         mTextSize = resources.getDimensionPixelSize(R.dimen.net_traffic_text_size);
-        setTypeface(Typeface.create(resources.getString(
-                com.android.internal.R.string.config_headlineFontFamily), Typeface.BOLD));
+        // MiraCLO: one line in the status bar's own font, size and weight, with steady digits.
+        setTypeface(Typeface.create(Typeface.create(resources.getString(
+                com.android.internal.R.string.config_headlineFontFamily), Typeface.NORMAL),
+                500, false));
+        setFontFeatureSettings("tnum");
+        setSingleLine(true);
+        setIncludeFontPadding(false);
 
         mNetworkTrafficIsVisible = false;
 
@@ -267,7 +272,7 @@ public class NetworkTraffic extends TextView {
 
                 if (unitid != 0) {
                     unit = mContext.getString(unitid);
-                    return value + "\n" + unit;
+                    return value + "\u2009" + unit;
                 } else {
                     return value;
                 }

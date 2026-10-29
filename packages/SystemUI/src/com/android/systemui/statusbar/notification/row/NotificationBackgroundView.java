@@ -23,15 +23,20 @@ import static com.android.systemui.util.ColorUtilKt.hexColorString;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PorterDuff;
 import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.util.AttributeSet;
 import android.view.View;
+import android.view.ViewParent;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -42,6 +47,7 @@ import com.android.internal.graphics.drawable.BackgroundBlurDrawable;
 import com.android.internal.util.ContrastColorUtil;
 import com.android.systemui.Dumpable;
 import com.android.systemui.common.shared.colors.SurfaceEffectColors;
+import com.android.systemui.miraclo.MiraCLOLiquidGlass;
 import com.android.systemui.res.R;
 import com.android.systemui.statusbar.notification.shared.NotificationAddXOnHoverToDismiss;
 import com.android.systemui.util.Assert;
@@ -88,6 +94,19 @@ public class NotificationBackgroundView extends View implements Dumpable,
     private boolean mDrawDismissButtonCutout = false;
     private boolean mOnKeyguard = true;
 
+    // MiraCLO Liquid Glass: the card fill turns see-through and gets the same gloss and
+    // light rim as the Liquid Glass QS and island. Only in the open shade, never on the
+    // lock screen or on a heads-up floating over an app.
+    private static final float GLASS_FILL = 0.45f;
+    private final Paint mGlassGloss = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint mGlassRim = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Path mGlassPath = new Path();
+    private final RectF mGlassRect = new RectF();
+    private final float[] mGlassRadii = new float[8];
+    private final float mGlassStroke;
+    private int mGlassShaderW = -1;
+    private int mGlassShaderH = -1;
+
     public NotificationBackgroundView(Context context, AttributeSet attrs) {
         super(context, attrs);
         mDontModifyCorners = getResources().getBoolean(R.bool.config_clipNotificationsToOutline);
@@ -102,6 +121,108 @@ public class NotificationBackgroundView extends View implements Dumpable,
                     com.android.internal.R.color.materialColorSurfaceContainerHigh);
         }
         mFocusOverlayStroke = getResources().getDimension(R.dimen.notification_focus_stroke_width);
+        mGlassStroke = 1.3f * getResources().getDisplayMetrics().density;
+        mGlassRim.setStyle(Paint.Style.STROKE);
+        mGlassRim.setStrokeWidth(mGlassStroke);
+        mGlassGloss.setStyle(Paint.Style.FILL);
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        MiraCLOLiquidGlass.attach(this);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        MiraCLOLiquidGlass.detach(this);
+        super.onDetachedFromWindow();
+    }
+
+    private boolean useLiquidGlass() {
+        if (mBackground == null || mBackgroundBlurDrawable != null || mExpandAnimationRunning) {
+            return false;
+        }
+        if (!MiraCLOLiquidGlass.isEnabled(mContext)) {
+            return false;
+        }
+        ViewParent parent = getParent();
+        if (!(parent instanceof ActivatableNotificationView view) || view.isOnKeyguard()) {
+            return false;
+        }
+        if (view instanceof ExpandableNotificationRow row
+                && (row.isPinned() || row.isHeadsUpAnimatingAway())) {
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isGroupChild() {
+        return getParent() instanceof ExpandableNotificationRow row && row.isChildInGroup();
+    }
+
+    /** Draws the card as glass: a see-through fill, then the gloss and the light rim. */
+    private void drawLiquidGlass(Canvas canvas, Drawable drawable, int left, int top, int right,
+            int bottom) {
+        final Drawable.Callback callback = drawable.getCallback();
+        // No callback while the alpha is changed for this one draw, so it does not ask for
+        // another frame.
+        drawable.setCallback(null);
+        drawable.setAlpha(Math.round(mDrawableAlpha * GLASS_FILL));
+        drawable.setBounds(left, top, right, bottom);
+        drawable.draw(canvas);
+        drawable.setAlpha(mDrawableAlpha);
+        drawable.setCallback(callback);
+
+        final int w = right - left;
+        final int h = bottom - top;
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        if (w != mGlassShaderW || h != mGlassShaderH) {
+            mGlassShaderW = w;
+            mGlassShaderH = h;
+            mGlassGloss.setShader(cssGradient(w, h, 155f,
+                    new int[] {0x33FFFFFF, 0x0AFFFFFF, 0x05FFFFFF, 0x1AFFFFFF},
+                    new float[] {0f, 0.42f, 0.60f, 1f}));
+            mGlassRim.setShader(cssGradient(w, h, 135f,
+                    new int[] {0xF2FFFFFF, 0x40FFFFFF, 0x0AFFFFFF, 0x59BED7FF, 0xD9FFFFFF},
+                    new float[] {0f, 0.22f, 0.50f, 0.78f, 1f}));
+        }
+        final int alpha = mDrawableAlpha;
+        canvas.save();
+        canvas.translate(left, top);
+        mGlassRect.set(0, 0, w, h);
+        mGlassPath.reset();
+        mGlassPath.addRoundRect(mGlassRect, mCornerRadii, Path.Direction.CW);
+        mGlassGloss.setAlpha(alpha);
+        canvas.drawPath(mGlassPath, mGlassGloss);
+        // Group children sit inside one card, so only the card itself gets the rim.
+        if (!isGroupChild()) {
+            final float inset = mGlassStroke / 2f;
+            for (int i = 0; i < 8; i++) {
+                mGlassRadii[i] = Math.max(0f, mCornerRadii[i] - inset);
+            }
+            mGlassRect.set(inset, inset, w - inset, h - inset);
+            mGlassPath.reset();
+            mGlassPath.addRoundRect(mGlassRect, mGlassRadii, Path.Direction.CW);
+            mGlassRim.setAlpha(alpha);
+            canvas.drawPath(mGlassPath, mGlassRim);
+        }
+        canvas.restore();
+    }
+
+    /** A linear gradient laid out like CSS linear-gradient(angle) over a w x h box. */
+    private static LinearGradient cssGradient(int w, int h, float angle, int[] colors,
+            float[] stops) {
+        final double rad = Math.toRadians(angle);
+        final float dx = (float) Math.sin(rad);
+        final float dy = (float) -Math.cos(rad);
+        final float half = (Math.abs(w * dx) + Math.abs(h * dy)) / 2f;
+        final float cx = w / 2f;
+        final float cy = h / 2f;
+        return new LinearGradient(cx - dx * half, cy - dy * half, cx + dx * half,
+                cy + dy * half, colors, stops, Shader.TileMode.CLAMP);
     }
 
     @Override
@@ -150,8 +271,14 @@ public class NotificationBackgroundView extends View implements Dumpable,
                 mBackgroundBlurDrawable.setBounds(backgroundBounds);
                 mBackgroundBlurDrawable.draw(canvas);
             } else if (mBackground != null) {
-                mBackground.setBounds(backgroundBounds);
-                mBackground.draw(canvas);
+                if (useLiquidGlass()) {
+                    drawLiquidGlass(canvas, mBackground, backgroundBounds.left,
+                            backgroundBounds.top, backgroundBounds.right,
+                            backgroundBounds.bottom);
+                } else {
+                    mBackground.setBounds(backgroundBounds);
+                    mBackground.draw(canvas);
+                }
             }
 
             canvas.restore();
@@ -243,6 +370,10 @@ public class NotificationBackgroundView extends View implements Dumpable,
                 // Horizontally center this background view inside of the container
                 left = (int) ((width - actualWidth) / 2.0f);
                 right = (int) (left + actualWidth);
+            }
+            if (drawable == mBackground && useLiquidGlass()) {
+                drawLiquidGlass(canvas, drawable, left, top, right, bottom);
+                return;
             }
             drawable.setBounds(left, top, right, bottom);
             drawable.draw(canvas);

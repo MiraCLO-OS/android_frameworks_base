@@ -11,7 +11,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioManager
-import android.media.projection.StopReason
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.PowerManager
@@ -30,6 +29,8 @@ class IslandSystemSources(
     private val context: Context,
     private val mainHandler: Handler,
     private val screenRecord: ScreenRecordUxController,
+    /** Stops the recording the way the status bar chip does (works with either recorder). */
+    private val stopRecording: () -> Unit,
     private val sink: Sink,
 ) {
     interface Sink {
@@ -42,9 +43,23 @@ class IslandSystemSources(
 
     private var recordingSince = 0L
 
+    // The recorder reports from different threads depending on which one the device uses (the
+    // newer one calls from a background coroutine, and stops working if a callback throws).
+    // Everything is handed to the main thread, and nothing here may throw back into it.
+    private fun onMain(block: () -> Unit) {
+        mainHandler.post {
+            try {
+                block()
+            } catch (e: RuntimeException) {
+                android.util.Log.w("MiraCLOIsland", "Screen recording update failed", e)
+            }
+        }
+    }
+
     private val recordCallback =
         object : ScreenRecordUxController.StateChangeCallback {
-            override fun onCountdown(millisUntilFinished: Long) {
+            override fun onCountdown(millisUntilFinished: Long) = onMain {
+                if (recordingSince != 0L) return@onMain
                 val secs = ((millisUntilFinished + 999) / 1000).coerceAtLeast(1)
                 sink.put(
                     recordActivity(
@@ -60,11 +75,14 @@ class IslandSystemSources(
                 )
             }
 
-            override fun onCountdownEnd() {
-                if (!screenRecord.isRecording) sink.remove(KEY_RECORD)
+            override fun onCountdownEnd() = onMain {
+                // Recording starts next (onRecordingStart) or the countdown was cancelled; either
+                // way the countdown itself is over.
+                if (recordingSince == 0L) sink.remove(KEY_RECORD)
             }
 
-            override fun onRecordingStart() {
+            override fun onRecordingStart() = onMain {
+                if (recordingSince != 0L) return@onMain
                 recordingSince = SystemClock.elapsedRealtime()
                 sink.put(
                     recordActivity(
@@ -72,15 +90,13 @@ class IslandSystemSources(
                         subtitle = "Screen recording",
                         clock = IslandClock(recordingSince, false, true, 0L),
                         actions = listOf(
-                            IslandAction("Stop", null, null, IslandAction.Style.DANGER) {
-                                screenRecord.stopRecording(StopReason.STOP_PRIVACY_CHIP)
-                            }
+                            IslandAction("Stop", null, null, IslandAction.Style.DANGER) { stopRecording() }
                         ),
                     )
                 )
             }
 
-            override fun onRecordingEnd() {
+            override fun onRecordingEnd() = onMain {
                 recordingSince = 0L
                 sink.remove(KEY_RECORD)
             }

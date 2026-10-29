@@ -1398,6 +1398,24 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
     }
 
     /** The island's own glyph for an activity, or null when it shows the app's icon. */
+    /** The island's own icon for a common button label (Pause, Resume, Lap, Reset), or null. */
+    private fun ownGlyph(label: CharSequence): Glyphs.Glyph? {
+        val l = label.toString().lowercase()
+        return when {
+            "pause" in l -> Glyphs.Glyph.PAUSE
+            "resume" in l || "start" in l || l == "play" || "continue" in l -> Glyphs.Glyph.PLAY
+            "lap" in l -> Glyphs.Glyph.LAP
+            "reset" in l -> Glyphs.Glyph.RESET
+            "stop" in l || "dismiss" in l -> Glyphs.Glyph.STOP
+            else -> null
+        }
+    }
+
+    private fun isAddMinute(label: CharSequence): Boolean {
+        val l = label.toString().lowercase().replace(" ", "")
+        return l.startsWith("+1") || l.startsWith("add1") || "1min" in l
+    }
+
     private fun glyphFor(a: IslandActivity): Glyphs.Glyph? =
         when (a.symbol) {
             IslandSymbol.RECORD -> Glyphs.Glyph.RECORD
@@ -1624,7 +1642,9 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             a.actions.forEachIndexed { i, action ->
                 val b = actionButton(action, a)
                 b.setOnClickListener { item.sendAction(action) }
-                buttons.addView(b, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(46)).apply {
+                // Round buttons stay round: a fixed square, never stretched to their content.
+                val w = if (b is ImageButton) dp(46) else LinearLayout.LayoutParams.WRAP_CONTENT
+                buttons.addView(b, LinearLayout.LayoutParams(w, dp(46)).apply {
                     if (i > 0) marginStart = dp(10)
                 })
             }
@@ -1640,6 +1660,35 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 }
             val fg = if (action.style == IslandAction.Style.PRIMARY && isLight(accent)) 0xFF111111.toInt() else Color.WHITE
             val answer = a.kind == IslandKind.CALL && action.style == IslandAction.Style.PRIMARY
+            // Timer, stopwatch and other everyday buttons get the island's own icons, so they all
+            // look alike whatever icons the app ships ("+1:00" stays as text).
+            val own = if (a.kind == IslandKind.CALL) null else ownGlyph(action.label)
+            val plusMinute = a.kind != IslandKind.CALL && isAddMinute(action.label)
+            if (plusMinute) {
+                return TextView(context).apply {
+                    text = "+1:00"
+                    setTextColor(fg)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    typeface = Typeface.create(Typeface.DEFAULT, 600, false)
+                    gravity = Gravity.CENTER
+                    maxLines = 1
+                    minWidth = dp(46)
+                    setPadding(dp(14), 0, dp(14), 0)
+                    background = roundRect(bg, dp(23).toFloat())
+                    isClickable = true
+                    contentDescription = action.label
+                }
+            }
+            if (own != null && action.style != IslandAction.Style.DANGER) {
+                return ImageButton(context).apply {
+                    background = circle(bg)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    val pad = dp(if (own == Glyphs.Glyph.LAP || own == Glyphs.Glyph.RESET) 12 else 13)
+                    setPadding(pad, pad, pad, pad)
+                    setImageDrawable(GlyphDrawable(own, fg))
+                    contentDescription = action.label
+                }
+            }
             return if (action.style == IslandAction.Style.DANGER || action.icon != null || answer) {
                 ImageButton(context).apply {
                     background = circle(if (answer) 0xFF22C55E.toInt() else bg)
@@ -2049,6 +2098,10 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             BATTERY_LOW(true, "M4 8h14v8H4zM20 11v2M7 11v2"),
             DOT(false, "M12 8a4 4 0 1 1 0 8a4 4 0 1 1 0-8z"),
             NOTE(false, "M9 17.5V6l10-2v11.5a2.6 2.6 0 1 1-1.8-2.5V7.6L10.8 8.9v8.6a2.6 2.6 0 1 1-1.8-2.5z"),
+            PAUSE(false, "M7.5 5h3a.5.5 0 0 1 .5.5v13a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-13a.5.5 0 0 1 .5-.5zM13.5 5h3a.5.5 0 0 1 .5.5v13a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-13a.5.5 0 0 1 .5-.5z"),
+            PLAY(false, "M8 5.6v12.8a1 1 0 0 0 1.5.86l10.2-6.4a1 1 0 0 0 0-1.72L9.5 4.74A1 1 0 0 0 8 5.6z"),
+            LAP(true, "M6 21V4M6 4h11l-2.5 4L17 12H6"),
+            RESET(true, "M5 12a7 7 0 1 0 2.05-4.95M5 4.5V8h3.5"),
         }
 
         private val paths = HashMap<Glyph, Path>()

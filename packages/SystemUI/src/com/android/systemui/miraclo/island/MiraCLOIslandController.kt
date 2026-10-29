@@ -40,6 +40,8 @@ import com.android.systemui.media.controls.shared.model.MediaData
 import com.android.systemui.plugins.ActivityStarter
 import com.android.systemui.plugins.statusbar.StatusBarStateController
 import com.android.systemui.screenrecord.ScreenRecordUxController
+import com.android.systemui.screenrecord.data.repository.ScreenRecordRepository
+import android.media.projection.StopReason
 import com.android.systemui.shade.ShadeExpansionStateManager
 import com.android.systemui.shared.system.TaskStackChangeListener
 import com.android.systemui.shared.system.TaskStackChangeListeners
@@ -90,6 +92,7 @@ constructor(
     private val statusBarStateController: StatusBarStateController,
     private val activityStarter: ActivityStarter,
     private val screenRecordController: ScreenRecordUxController,
+    private val screenRecordRepository: ScreenRecordRepository,
     private val interruptionDecisionProvider: VisualInterruptionDecisionProvider,
     @Main private val mainHandler: Handler,
     @Background private val bgExecutor: Executor,
@@ -103,6 +106,10 @@ constructor(
             context,
             mainHandler,
             screenRecordController,
+            {
+                // Off the main thread, like the status bar chip's Stop.
+                bgExecutor.execute { screenRecordRepository.stopRecording(StopReason.STOP_PRIVACY_CHIP) }
+            },
             object : IslandSystemSources.Sink {
                 override fun put(activity: IslandActivity) = putActivity(activity)
 

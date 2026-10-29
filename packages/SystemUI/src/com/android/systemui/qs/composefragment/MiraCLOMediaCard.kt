@@ -9,6 +9,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.Icon as AndroidIcon
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,12 +30,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -173,7 +181,7 @@ internal fun MiraCLOMediaCard(
                 modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
             ) {
                 MiraCLOMediaButton(buttons?.prevOrCustom, iconSize = 22.dp)
-                MiraCLOMediaButton(buttons?.playOrPause, iconSize = 30.dp)
+                MiraCLOPlayPauseButton(buttons?.playOrPause, playing = data.isPlaying == true)
                 MiraCLOMediaButton(buttons?.nextOrCustom, iconSize = 22.dp)
             }
         }
@@ -198,6 +206,47 @@ private fun MiraCLOMediaButton(action: MediaAction?, iconSize: Dp) {
                 tint = Color.White,
                 modifier = Modifier.size(iconSize),
             )
+        }
+    }
+}
+
+/**
+ * Play / pause, drawn here from the playing state. The app's own icon is an animated drawable
+ * meant to be started by the old media player, so as a still image it often showed the wrong
+ * state. The icon flips at once on tap and then follows the real state when it arrives.
+ */
+@Composable
+private fun MiraCLOPlayPauseButton(action: MediaAction?, playing: Boolean) {
+    var shown by remember(playing) { mutableStateOf(playing) }
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier =
+            Modifier.size(44.dp)
+                .clip(CircleShape)
+                .clickable(enabled = action?.action != null) {
+                    action?.action?.run()
+                    shown = !shown
+                }
+                .semantics { contentDescription = if (shown) "Pause" else "Play" },
+    ) {
+        Canvas(Modifier.size(26.dp)) {
+            val w = size.width
+            val h = size.height
+            if (shown) {
+                val bar = w * 0.26f
+                val r = CornerRadius(bar * 0.3f, bar * 0.3f)
+                drawRoundRect(Color.White, Offset(w * 0.17f, h * 0.12f), Size(bar, h * 0.76f), r)
+                drawRoundRect(Color.White, Offset(w * 0.57f, h * 0.12f), Size(bar, h * 0.76f), r)
+            } else {
+                val path =
+                    Path().apply {
+                        moveTo(w * 0.26f, h * 0.10f)
+                        lineTo(w * 0.88f, h * 0.50f)
+                        lineTo(w * 0.26f, h * 0.90f)
+                        close()
+                    }
+                drawPath(path, Color.White)
+            }
         }
     }
 }

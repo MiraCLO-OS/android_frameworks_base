@@ -247,12 +247,8 @@ class IslandNotificationReader(private val context: Context) {
                         !alert && i == 0 -> IslandAction.Style.PRIMARY
                         else -> IslandAction.Style.NEUTRAL
                     }
-                IslandAction(
-                    label = a.title,
-                    icon = a.getIcon()?.loadDrawable(context),
-                    intent = a.actionIntent,
-                    style = style,
-                )
+                // The island draws its own icons for these (see the view), not Clock's.
+                IslandAction(label = a.title, icon = null, intent = a.actionIntent, style = style)
             }
 
     private fun collectTexts(view: View, out: MutableList<String>) {

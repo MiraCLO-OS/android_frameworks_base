@@ -158,6 +158,7 @@ import com.android.systemui.qs.panels.ui.compose.QuickQuickSettings
 import com.android.systemui.qs.panels.ui.compose.TileGrid
 import com.android.settingslib.volume.domain.interactor.AudioVolumeInteractor
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.InfiniteGridLayout
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOLiquidGlass
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOQsStyle
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalUseCircularQsTileShapes
 import com.android.systemui.qs.shared.ui.QuickSettings.Elements
@@ -227,6 +228,7 @@ constructor(
     private var showAutoBrightnessButton by mutableStateOf(true)
     private var useCircularQsTileShapes by mutableStateOf(false)
     private var miracloQsStyle by mutableStateOf(false)
+    private var miracloLiquidGlass by mutableStateOf(false)
 
     /** MiraCLO: media sessions for the ColorOS-style QS media card. */
     private val miracloMediaSessions = MiraCLOMediaSessions()
@@ -262,7 +264,8 @@ constructor(
                     Settings.System.QS_BRIGHTNESS_SLIDER_ROUND,
                     Settings.Secure.QS_SHOW_AUTO_BRIGHTNESS,
                     Settings.System.QS_TILES_CIRCULAR,
-                    MIRACLO_QS_STYLE -> readQsSettings()
+                    MIRACLO_QS_STYLE,
+                    MIRACLO_LIQUID_GLASS -> readQsSettings()
                 }
             }
         }
@@ -283,6 +286,9 @@ constructor(
             settingsObserver, UserHandle.USER_ALL)
         settingsResolver.registerContentObserver(
             Settings.Secure.getUriFor(MIRACLO_QS_STYLE), false,
+            settingsObserver, UserHandle.USER_ALL)
+        settingsResolver.registerContentObserver(
+            Settings.Secure.getUriFor(MIRACLO_LIQUID_GLASS), false,
             settingsObserver, UserHandle.USER_ALL)
         userTracker.addCallback(userChangedCallback) { mainHandler.post(it) }
         readQsSettings()
@@ -312,6 +318,8 @@ constructor(
             settingsResolver, Settings.System.QS_TILES_CIRCULAR, 0, userTracker.userId) != 0
         miracloQsStyle = Settings.Secure.getIntForUser(
             settingsResolver, MIRACLO_QS_STYLE, 0, userTracker.userId) != 0
+        miracloLiquidGlass = Settings.Secure.getIntForUser(
+            settingsResolver, MIRACLO_LIQUID_GLASS, 0, userTracker.userId) != 0
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -393,6 +401,7 @@ constructor(
             CompositionLocalProvider(
                 LocalUseCircularQsTileShapes provides useCircularQsTileShapes,
                 LocalMiraCLOQsStyle provides miracloQsStyle,
+                LocalMiraCLOLiquidGlass provides miracloLiquidGlass,
             ) {
                 ProvideShortcutHelperIndication(interactionsConfig = interactionsConfig()) {
                     Box(
@@ -1753,3 +1762,6 @@ private fun AlwaysDarkMode(content: @Composable () -> Unit) {
 
 /** MiraCLO: Settings.Secure key for the ColorOS-style Quick Settings layout (0 = off, 1 = on). */
 private const val MIRACLO_QS_STYLE = "miraclo_qs_style"
+
+/** MiraCLO: Settings.Secure key for Liquid Glass (Settings > Display), 0 = off, 1 = on. */
+private const val MIRACLO_LIQUID_GLASS = "miraclo_liquid_glass"

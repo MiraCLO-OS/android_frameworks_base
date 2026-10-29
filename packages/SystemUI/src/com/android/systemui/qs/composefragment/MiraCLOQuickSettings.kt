@@ -64,6 +64,9 @@ import com.android.systemui.qs.panels.ui.compose.GridLayout
 import com.android.systemui.qs.panels.ui.compose.TileListener
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.CommonTileDefaults
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.InfiniteGridLayout
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOLiquidGlass
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOLiquidHighlight
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOLiquidRim
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOColorOSGap
 import com.android.systemui.qs.panels.ui.viewmodel.TileViewModel
 import com.android.systemui.res.R
@@ -217,6 +220,7 @@ private data class MiraCLOGlass(
     val accent: Color,
     val secondaryText: Color,
     val dark: Boolean,
+    val liquid: Boolean,
 )
 
 @Composable
@@ -224,12 +228,16 @@ private fun miracloGlass(): MiraCLOGlass {
     val onSurface = MaterialTheme.colorScheme.onSurface
     val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     val accent = Color(0xFF1677FF)
+    val liquid = LocalMiraCLOLiquidGlass.current
     return MiraCLOGlass(
-        fill = if (dark) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.55f),
+        fill =
+            if (dark) Color.White.copy(alpha = if (liquid) 0.07f else 0.14f)
+            else Color.White.copy(alpha = if (liquid) 0.30f else 0.55f),
         iconOff = onSurface,
         accent = accent,
         secondaryText = onSurface.copy(alpha = 0.70f),
         dark = dark,
+        liquid = liquid,
     )
 }
 
@@ -238,7 +246,14 @@ private val MiraCLOGlassRim =
     Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f)))
 
 private fun Modifier.glassSurface(glass: MiraCLOGlass, shape: Shape): Modifier =
-    this.clip(shape).background(glass.fill, shape).border(1.dp, MiraCLOGlassRim, shape)
+    if (glass.liquid) {
+        this.clip(shape)
+            .background(glass.fill, shape)
+            .background(MiraCLOLiquidHighlight, shape)
+            .border(1.3.dp, MiraCLOLiquidRim, shape)
+    } else {
+        this.clip(shape).background(glass.fill, shape).border(1.dp, MiraCLOGlassRim, shape)
+    }
 
 /**
  * A tall pill slider: the white fill rises from the bottom. Dragging is relative to where the

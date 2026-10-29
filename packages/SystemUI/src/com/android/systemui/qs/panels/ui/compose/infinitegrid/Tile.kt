@@ -134,6 +134,26 @@ internal val LocalUseCircularQsTileShapes = compositionLocalOf { false }
 /** MiraCLO: ColorOS-style Quick Settings (glass tiles, round icon tiles with labels below). */
 internal val LocalMiraCLOQsStyle = compositionLocalOf { false }
 
+/** MiraCLO: Liquid Glass (Settings > Display): clearer glass with a bright specular edge. */
+internal val LocalMiraCLOLiquidGlass = compositionLocalOf { false }
+
+/** Liquid Glass edge: brightest at the top-left and bottom-right, like light catching glass. */
+internal val MiraCLOLiquidRim =
+    Brush.linearGradient(
+        0f to Color.White.copy(alpha = 0.95f),
+        0.22f to Color.White.copy(alpha = 0.25f),
+        0.5f to Color.White.copy(alpha = 0.04f),
+        0.78f to Color(0xFFBED7FF).copy(alpha = 0.35f),
+        1f to Color.White.copy(alpha = 0.85f),
+    )
+
+/** Liquid Glass inner light along the top of a shape. */
+internal val MiraCLOLiquidHighlight =
+    Brush.verticalGradient(
+        0f to Color.White.copy(alpha = 0.18f),
+        0.5f to Color.Transparent,
+    )
+
 /** Glass rim of MiraCLO tiles. Created once instead of on every frame of the QS animation. */
 private val MiraCLOTileRim =
     Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f)))
@@ -198,6 +218,7 @@ fun ContentScope.Tile(
             }
 
         val miracloStyle = LocalMiraCLOQsStyle.current
+        val liquidGlass = LocalMiraCLOLiquidGlass.current
         val colors =
             if (miracloStyle) TileDefaults.miracloColorsForState(uiState, iconOnly, tile.spec.spec)
             else TileDefaults.getColorForState(uiState, iconOnly)
@@ -271,7 +292,12 @@ fun ContentScope.Tile(
                         }
                         .then(surfaceRevealModifier)
                         .thenIf(miracloStyle) {
-                            Modifier.border(width = 1.dp, brush = MiraCLOTileRim, shape = tileShape)
+                            if (liquidGlass) {
+                                Modifier.background(MiraCLOLiquidHighlight, tileShape)
+                                    .border(width = 1.3.dp, brush = MiraCLOLiquidRim, shape = tileShape)
+                            } else {
+                                Modifier.border(width = 1.dp, brush = MiraCLOTileRim, shape = tileShape)
+                            }
                         }
                         .borderOnFocus(
                             color = MaterialTheme.colorScheme.secondary,
@@ -679,7 +705,10 @@ private object TileDefaults {
         val onSurface = MaterialTheme.colorScheme.onSurface
         val darkPanel = MaterialTheme.colorScheme.surface.luminance() < 0.5f
         val accent = if (spec in MIRACLO_DATA_TILES) MiraCLOGreen else MiraCLOBlue
-        val glass = if (darkPanel) Color.White.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.55f)
+        val liquid = LocalMiraCLOLiquidGlass.current
+        val glass =
+            if (darkPanel) Color.White.copy(alpha = if (liquid) 0.07f else 0.14f)
+            else Color.White.copy(alpha = if (liquid) 0.30f else 0.55f)
         val bubbleOff =
             if (darkPanel) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.06f)
         val bubbleOn = if (darkPanel) Color.White else accent

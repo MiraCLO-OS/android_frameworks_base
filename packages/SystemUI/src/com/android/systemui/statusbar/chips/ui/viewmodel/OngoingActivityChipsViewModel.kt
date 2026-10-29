@@ -22,6 +22,7 @@ import com.android.systemui.display.dagger.SystemUIDisplaySubcomponent.PerDispla
 import com.android.systemui.display.domain.interactor.DisplayStateInteractor
 import com.android.systemui.log.LogBuffer
 import com.android.systemui.log.core.LogLevel
+import com.android.systemui.miraclo.island.IslandChipFilter
 import com.android.systemui.screencapture.record.domain.interactor.ScreenCaptureRecordFeaturesInteractor
 import com.android.systemui.statusbar.chips.StatusBarChipLogTags.pad
 import com.android.systemui.statusbar.chips.StatusBarChipToHunAnimation
@@ -213,9 +214,21 @@ constructor(
      * A flow modeling the active and inactive chips as well as which should be shown in the status
      * bar after accounting for possibly multiple ongoing activities and animation requirements.
      */
+    /** MiraCLO: leaves out the chips the Dynamic Island already shows. */
+    private val islandFilteredChipBundle =
+        combine(incomingChipBundle, IslandChipFilter.state) { bundle, island ->
+            bundle.copy(
+                screenRecord =
+                    if (island.hideScreenRecord) OngoingActivityChipModel.Inactive()
+                    else bundle.screenRecord,
+                call = if (island.hideCall) OngoingActivityChipModel.Inactive() else bundle.call,
+                notifs = bundle.notifs.filter { it.notificationKey !in island.notificationKeys },
+            )
+        }
+
     private val unrefinedChips =
         combine(
-            incomingChipBundle.map { bundle -> rankChips(bundle) },
+            islandFilteredChipBundle.map { bundle -> rankChips(bundle) },
             displayStateInteractor.isWideScreen,
         ) { rankedChips, isWideScreen ->
             if (

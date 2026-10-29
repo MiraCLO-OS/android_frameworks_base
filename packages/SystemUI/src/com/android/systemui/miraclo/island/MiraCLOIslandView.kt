@@ -111,10 +111,15 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         val touchGlow: Boolean = true,
         val ambientGlow: Boolean = true,
         val haptics: Boolean = true,
+        /** Liquid Glass cards: clearer glass with a bright edge instead of the frosted dark glass. */
+        val glass: Boolean = false,
     )
 
-    /** [pills]: main, right, left (in that order). [cards]: top card first. */
-    data class State(val pills: List<IslandActivity>, val cards: List<IslandActivity>)
+    /**
+     * [pills] by slot: main, right, left. A slot whose activity is open as a card is null, so the
+     * other pills keep their places. [cards]: top card first.
+     */
+    data class State(val pills: List<IslandActivity?>, val cards: List<IslandActivity>)
 
     /** How an activity leaves when it is no longer shown. */
     enum class Exit {
@@ -333,19 +338,20 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         if (wasTouchable != (a >= 0.5f)) requestLayout()
     }
 
-    /** Tells the status bar how much room the pills need around the camera (see [IslandStatusBarSpace]). */
+    /** Tells the status bar which icons can stay beside the pills (see [IslandStatusBarSpace]). */
     private fun publishStatusBarSpace() {
-        if (released || !shownTarget || shadeFraction >= SHADE_HIDE_FRACTION || width == 0) {
-            IslandStatusBarSpace.request(0)
+        if (released || !shownTarget || shadeFraction >= SHADE_HIDE_FRACTION) {
+            IslandStatusBarSpace.request(IslandStatusBarSpace.NONE)
             return
         }
-        val cx = cameraX()
-        var half = 0f
-        for (a in state.pills) {
-            val g = items[a.key]?.takeIf { !it.leaving }?.target ?: continue
-            half = max(half, max(cx - g.x, g.x + g.w - cx))
-        }
-        IslandStatusBarSpace.request(if (half > 0f) (2f * (half + dp(2))).toInt() else 0)
+        val live = { a: IslandActivity? -> a != null && items[a.key]?.leaving == false }
+        val mode =
+            when {
+                live(state.pills.getOrNull(1)) || live(state.pills.getOrNull(2)) -> IslandStatusBarSpace.SIDE_PILLS
+                live(state.pills.getOrNull(0)) -> IslandStatusBarSpace.MAIN_PILL
+                else -> IslandStatusBarSpace.NONE
+            }
+        IslandStatusBarSpace.request(mode)
     }
 
     private fun scheduleFrame() {
@@ -362,7 +368,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
     fun render(newState: State) {
         state = newState
-        val shown = newState.pills + newState.cards
+        val shown = newState.pills.filterNotNull() + newState.cards
         val keys = shown.map { it.key }.toSet()
 
         // Leaving.
@@ -423,7 +429,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         val pillLeft = cameraX() - pillW / 2f
         val top = pillTop()
         state.pills.forEachIndexed { i, a ->
-            val item = items[a.key] ?: return@forEachIndexed
+            val item = a?.let { items[it.key] } ?: return@forEachIndexed
             item.translationZ = dp(10).toFloat()
             when (i) {
                 0 -> {
@@ -692,6 +698,10 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         private val discPaint = Paint(Paint.ANTI_ALIAS_FLAG)
         private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+        }
         private val tmpRect = RectF()
         private val artClip = Path()
         private var pillText = ""
@@ -730,11 +740,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
-            blur =
-                viewRootImpl?.createBackgroundBlurDrawable()?.apply {
-                    setBlurRadius(dp(36))
-                    setColor(0x8C141519.toInt())
-                }
+            blur = viewRootImpl?.createBackgroundBlurDrawable()
+            applyGlassStyle()
             if (kind == IslandKind.MEDIA) barAnimator.start()
         }
 
@@ -751,8 +758,39 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         }
 
         fun onConfigChanged() {
+            applyGlassStyle()
             aura.invalidate()
             apply()
+        }
+
+        /**
+         * Frosted dark glass (default), or Liquid Glass: much less blur and tint so what is
+         * behind stays visible, with a bright specular edge (top-left and bottom-right) and a
+         * soft inner light.
+         */
+        private fun applyGlassStyle() {
+            val glass = config.glass
+            blur?.setBlurRadius(dp(if (glass) 14 else 36))
+            blur?.setColor(if (glass) 0x4D10131C else 0x8C141519.toInt())
+            if (width > 0) updateRimShaders(width, height)
+            invalidate()
+        }
+
+        private fun updateRimShaders(w: Int, h: Int) {
+            if (config.glass) {
+                gloss.shader = LinearGradient(0f, 0f, 0f, h * 0.5f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+                cardRim.shader = LinearGradient(
+                    0f, 0f, w.toFloat(), h.toFloat(),
+                    intArrayOf(0xF2FFFFFF.toInt(), 0x40FFFFFF, 0x0AFFFFFF, 0x59BED7FF, 0xD9FFFFFF.toInt()),
+                    floatArrayOf(0f, 0.22f, 0.5f, 0.78f, 1f),
+                    Shader.TileMode.CLAMP,
+                )
+                cardRim.strokeWidth = dp(1) * 1.3f
+            } else {
+                gloss.shader = LinearGradient(0f, 0f, 0f, h * 0.45f, 0x24FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
+                cardRim.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0x47FFFFFF, 0x0FFFFFFF, Shader.TileMode.CLAMP)
+                cardRim.strokeWidth = dp(1).toFloat()
+            }
         }
 
         fun bind(a: IslandActivity, stacked: Boolean) {
@@ -780,7 +818,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 when {
                     clock != null ->
                         IslandClock.format(clock.millis(), tenths = kind == IslandKind.STOPWATCH)
-                    else -> activity.subtitle?.toString().orEmpty()
+                    else -> (activity.value ?: activity.subtitle)?.toString().orEmpty()
                 }
             if (t == pillText) return false
             pillText = t
@@ -947,6 +985,13 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             invalidate()
         }
 
+        /** Whether a point (in this view's coordinates) is on the visible shape. */
+        private fun isInShape(x: Float, y: Float): Boolean {
+            val g = geo
+            val grow = if (g.c > 0.5f) 0f else dp(if (g.b > 0.5f) 8 else 6).toFloat()
+            return x >= -grow && y >= -grow && x <= g.w + grow && y <= g.h + grow
+        }
+
         fun hitRect(out: Rect) {
             val g = geo
             val x = g.x + dragX
@@ -960,8 +1005,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            gloss.shader = LinearGradient(0f, 0f, 0f, h * 0.45f, 0x24FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
-            cardRim.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), 0x47FFFFFF, 0x0FFFFFFF, Shader.TileMode.CLAMP)
+            updateRimShaders(w, h)
             // The shape's target may depend on the height (card stack).
             retargetPending = true
             apply()
@@ -1076,7 +1120,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 val s = min(g.w, g.h) - dp(10)
                 drawArt(canvas, activity.art, cx - s / 2f, cy - s / 2f, s, dp(6).toFloat(), a255)
             } else {
-                Glyphs.draw(canvas, kind.glyph(), cx, cy, dp(16).toFloat(), glyphColor(), a255)
+                drawDisc(canvas, cx, cy, min(g.w, g.h) / 2f - dp(5), a255)
             }
         }
 
@@ -1097,13 +1141,46 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             canvas.restore()
         }
 
-        /** The round icon at the left of a pill. */
+        /** The round icon at the left of a pill (or inside a round pill). */
         private fun drawDisc(canvas: Canvas, cx: Float, cy: Float, radius: Float, a: Int) {
+            val act = activity
             val solid = kind == IslandKind.CALL
-            discPaint.color = if (solid) 0xFF22C55E.toInt() else activity.accent
-            discPaint.alpha = if (solid) a else (a * 0.18f).toInt()
-            canvas.drawCircle(cx, cy, radius, discPaint)
-            Glyphs.draw(canvas, kind.glyph(), cx, cy, radius * 1.15f, if (solid) Color.WHITE else activity.accent, a)
+            val glyph = glyphFor(act)
+            val photo = act.art.takeIf { kind == IslandKind.LIVE || kind == IslandKind.PROGRESS }
+            when {
+                photo != null -> drawArt(canvas, photo, cx - radius, cy - radius, radius * 2f, radius, a)
+                glyph == null && act.icon != null -> {
+                    discPaint.color = act.accent
+                    discPaint.alpha = (a * 0.18f).toInt()
+                    canvas.drawCircle(cx, cy, radius, discPaint)
+                    val d = act.icon
+                    val s = (radius * 1.1f).toInt()
+                    d.setBounds((cx - s / 2f).toInt(), (cy - s / 2f).toInt(), (cx + s / 2f).toInt(), (cy + s / 2f).toInt())
+                    d.setTint(act.accent)
+                    d.alpha = a
+                    d.draw(canvas)
+                }
+                else -> {
+                    discPaint.color = if (solid) 0xFF22C55E.toInt() else act.accent
+                    discPaint.alpha = if (solid) a else (a * 0.18f).toInt()
+                    canvas.drawCircle(cx, cy, radius, discPaint)
+                    Glyphs.draw(canvas, glyph ?: Glyphs.Glyph.DOT, cx, cy, radius * 1.15f,
+                        if (solid) Color.WHITE else act.accent, a)
+                }
+            }
+            // Progress (downloads, transfers): a ring around the icon.
+            val p = act.progress
+            if (p != null) {
+                ringPaint.color = 0x2EFFFFFF
+                ringPaint.alpha = (a * 0.18f).toInt()
+                ringPaint.strokeWidth = dp(2).toFloat()
+                tmpRect.set(cx - radius, cy - radius, cx + radius, cy + radius)
+                tmpRect.inset(ringPaint.strokeWidth / 2f, ringPaint.strokeWidth / 2f)
+                canvas.drawArc(tmpRect, 0f, 360f, false, ringPaint)
+                ringPaint.color = act.accent
+                ringPaint.alpha = a
+                canvas.drawArc(tmpRect, -90f, 360f * p, false, ringPaint)
+            }
         }
 
         private fun valueColor(): Int = if (kind == IslandKind.STOPWATCH) Color.WHITE else activity.accent
@@ -1113,6 +1190,10 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         // Touch
 
         override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+            // Every shape is laid out at card size and only clipped to its form, so a touch can
+            // land in a pill's invisible box. Refuse it there: the window then offers the touch
+            // to the shape that really is under the finger.
+            if (ev.actionMasked == MotionEvent.ACTION_DOWN && !isInShape(ev.x, ev.y)) return false
             if (role == Role.CARD) {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
@@ -1313,12 +1394,27 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         return Color.HSVToColor(hsv)
     }
 
-    private fun IslandKind.glyph(): Glyphs.Glyph =
-        when (this) {
-            IslandKind.CALL -> Glyphs.Glyph.PHONE
-            IslandKind.TIMER -> Glyphs.Glyph.HOURGLASS
-            IslandKind.STOPWATCH -> Glyphs.Glyph.STOPWATCH
-            IslandKind.MEDIA -> Glyphs.Glyph.NOTE
+    /** The island's own glyph for an activity, or null when it shows the app's icon. */
+    private fun glyphFor(a: IslandActivity): Glyphs.Glyph? =
+        when (a.symbol) {
+            IslandSymbol.RECORD -> Glyphs.Glyph.RECORD
+            IslandSymbol.BOLT -> Glyphs.Glyph.BOLT
+            IslandSymbol.EARBUDS -> Glyphs.Glyph.EARBUDS
+            IslandSymbol.BELL -> Glyphs.Glyph.BELL
+            IslandSymbol.VIBRATE -> Glyphs.Glyph.VIBRATE
+            IslandSymbol.SILENT -> Glyphs.Glyph.SILENT
+            IslandSymbol.BATTERY_LOW -> Glyphs.Glyph.BATTERY_LOW
+            null ->
+                when (a.kind) {
+                    IslandKind.CALL -> Glyphs.Glyph.PHONE
+                    IslandKind.TIMER -> Glyphs.Glyph.HOURGLASS
+                    IslandKind.STOPWATCH -> Glyphs.Glyph.STOPWATCH
+                    IslandKind.MEDIA -> Glyphs.Glyph.NOTE
+                    IslandKind.SCREEN_RECORD -> Glyphs.Glyph.RECORD
+                    IslandKind.LIVE,
+                    IslandKind.PROGRESS,
+                    IslandKind.SYSTEM -> if (a.icon != null) null else Glyphs.Glyph.DOT
+                }
         }
 
     // Glow behind a card ---------------------------------------------------------------------------
@@ -1376,7 +1472,12 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
     /** Compact card (call, timer, stopwatch): icon, big live value, label, buttons. */
     private inner class CompactContent(context: Context, private val item: Item) : CardContent {
         private val row = LinearLayout(context)
-        override val view: View = row
+        private val frame = FrameLayout(context)
+        override val view: View = frame
+        /** The app's icon (live updates, downloads), tinted with its colour. */
+        private val appIcon = ImageView(context)
+        /** A thin progress line along the bottom of the card. */
+        private val progressLine = ThinProgress(context)
         private val lead = FrameLayout(context)
         private val glyph = GlyphView(context)
         private val avatar = ImageView(context)
@@ -1409,6 +1510,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             avatar.clipToOutline = true
             initial.gravity = Gravity.CENTER
             lead.addView(glyph, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.CENTER))
+            lead.addView(appIcon, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER))
             lead.addView(avatar, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
             lead.addView(initial, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.CENTER))
             row.addView(lead, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48)))
@@ -1426,6 +1528,12 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             buttons.orientation = LinearLayout.HORIZONTAL
             buttons.gravity = Gravity.CENTER_VERTICAL
             row.addView(buttons, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, compactH))
+            frame.addView(row, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+            frame.addView(progressLine, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, dp(14), Gravity.BOTTOM).apply {
+                leftMargin = dp(20)
+                rightMargin = dp(20)
+                bottomMargin = dp(4)
+            })
             row.addOnAttachStateChangeListener(
                 object : OnAttachStateChangeListener {
                     override fun onViewAttachedToWindow(v: View) {
@@ -1440,27 +1548,54 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         override fun bind(a: IslandActivity, stacked: Boolean) {
             activity = a
             val isCall = a.kind == IslandKind.CALL
-            glyph.visibility = if (isCall) GONE else VISIBLE
-            glyph.set(item.kind.glyph(), a.accent)
-            avatar.visibility = if (isCall && a.art != null) VISIBLE else GONE
-            avatar.setImageBitmap(a.art)
+            val generic = a.kind == IslandKind.LIVE || a.kind == IslandKind.PROGRESS
+            val photo = if (isCall || generic) a.art else null
+            val g = glyphFor(a)
+            glyph.visibility = if (!isCall && photo == null && g != null) VISIBLE else GONE
+            if (g != null) glyph.set(g, a.accent)
+            appIcon.visibility = if (!isCall && photo == null && g == null && a.icon != null) VISIBLE else GONE
+            appIcon.setImageDrawable(a.icon)
+            appIcon.imageTintList = ColorStateList.valueOf(a.accent)
+            avatar.visibility = if (photo != null) VISIBLE else GONE
+            avatar.setImageBitmap(photo)
             initial.visibility = if (isCall && a.art == null) VISIBLE else GONE
             initial.background = circle(0xFF475569.toInt())
             initial.text = a.title.firstOrNull()?.uppercase() ?: ""
             val paused = a.clock?.running == false
-            if (isCall) {
-                big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
-                big.setTextColor(Color.WHITE)
-                big.text = a.title
-                label.setTextColor(a.accent)
-            } else {
-                big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30f)
-                val color = if (a.kind == IslandKind.TIMER) a.accent else Color.WHITE
-                // A paused time dims.
-                big.setTextColor(if (paused) (color and 0x00FFFFFF) or 0xB3000000.toInt() else color)
-                label.setTextColor(0x99FFFFFF.toInt())
-                label.text = if (paused && !a.alert) "${a.title} · Paused" else a.title
+            when {
+                isCall -> {
+                    big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                    big.setTextColor(Color.WHITE)
+                    big.text = a.title
+                    label.setTextColor(a.accent)
+                }
+                // A live update or download without a short value: its title, like a call.
+                generic && a.value == null && a.clock == null -> {
+                    big.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+                    big.setTextColor(Color.WHITE)
+                    big.text = a.title
+                    label.setTextColor(0x99FFFFFF.toInt())
+                    label.text = a.subtitle
+                }
+                else -> {
+                    val long = (a.value?.length ?: 0) > 7
+                    big.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (long) 20f else 30f)
+                    val color = if (a.kind == IslandKind.STOPWATCH) Color.WHITE else a.accent
+                    // A paused time dims.
+                    big.setTextColor(if (paused) (color and 0x00FFFFFF) or 0xB3000000.toInt() else color)
+                    label.setTextColor(0x99FFFFFF.toInt())
+                    label.text =
+                        when {
+                            paused && !a.alert -> "${a.title} · Paused"
+                            generic && a.subtitle != null -> "${a.title} · ${a.subtitle}"
+                            a.kind == IslandKind.SCREEN_RECORD -> a.subtitle
+                            else -> a.title
+                        }
+                }
             }
+            val p = a.progress
+            progressLine.visibility = if (p != null) VISIBLE else GONE
+            if (p != null) progressLine.set(p, a.accent)
             if (a.alert) {
                 if (!blink.isStarted && row.isAttachedToWindow) blink.start()
             } else {
@@ -1501,12 +1636,16 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                     IslandAction.Style.NEUTRAL -> 0x29FFFFFF
                 }
             val fg = if (action.style == IslandAction.Style.PRIMARY && isLight(accent)) 0xFF111111.toInt() else Color.WHITE
-            return if (action.style == IslandAction.Style.DANGER || action.icon != null) {
+            val answer = a.kind == IslandKind.CALL && action.style == IslandAction.Style.PRIMARY
+            return if (action.style == IslandAction.Style.DANGER || action.icon != null || answer) {
                 ImageButton(context).apply {
-                    background = circle(bg)
+                    background = circle(if (answer) 0xFF22C55E.toInt() else bg)
                     minimumWidth = dp(46)
                     scaleType = ImageView.ScaleType.FIT_CENTER
-                    if (action.style == IslandAction.Style.DANGER) {
+                    if (answer) {
+                        setPadding(dp(12), dp(12), dp(12), dp(12))
+                        setImageDrawable(GlyphDrawable(Glyphs.Glyph.PHONE, Color.WHITE))
+                    } else if (action.style == IslandAction.Style.DANGER) {
                         // Our own shapes: hang up for calls, a stop square for the rest.
                         val g = if (a.kind == IslandKind.CALL) Glyphs.Glyph.END_CALL else Glyphs.Glyph.STOP
                         val pad = dp(if (g == Glyphs.Glyph.STOP) 13 else 11)
@@ -1541,6 +1680,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             val value =
                 when {
                     clock != null -> IslandClock.format(clock.millis(), a.kind == IslandKind.STOPWATCH)
+                    a.value != null -> a.value.toString()
+                    a.kind == IslandKind.LIVE || a.kind == IslandKind.PROGRESS -> return
                     else -> a.subtitle?.toString().orEmpty()
                 }
             if (a.kind == IslandKind.CALL) {
@@ -1558,6 +1699,29 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             val running = activity?.clock?.running == true
             if (shown && running) update()
             return false
+        }
+    }
+
+    /** A thin rounded progress line (downloads, transfers, live updates). */
+    private inner class ThinProgress(context: Context) : View(context) {
+        private var fraction = 0f
+        private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x29FFFFFF }
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val r = RectF()
+
+        fun set(f: Float, color: Int) {
+            fraction = f.coerceIn(0f, 1f)
+            fill.color = color
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val h = dp(3).toFloat()
+            val y = height - h - dp(4)
+            r.set(0f, y, width.toFloat(), y + h)
+            canvas.drawRoundRect(r, h / 2f, h / 2f, track)
+            r.right = width * fraction
+            if (r.right > h) canvas.drawRoundRect(r, h / 2f, h / 2f, fill)
         }
     }
 
@@ -1883,6 +2047,14 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             HOURGLASS(true, "M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9"),
             STOPWATCH(true, "M12 5a8 8 0 1 1 0 16a8 8 0 1 1 0-16zM12 13V9M10 2.5h4M18.5 6l1.5-1.5"),
             STOP(false, "M8 6h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"),
+            RECORD(false, "M12 6.5a5.5 5.5 0 1 1 0 11a5.5 5.5 0 1 1 0-11z"),
+            BOLT(false, "M13 2 4.5 13.5H11l-1 8.5L19.5 10H13z"),
+            EARBUDS(true, "M8 4a3 3 0 0 0-3 3v2a3 3 0 0 0 3 3v8M16 4a3 3 0 0 1 3 3v2a3 3 0 0 1-3 3v8"),
+            BELL(true, "M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 21h4"),
+            VIBRATE(true, "M8 4h8v16H8zM4 8v8M20 8v8"),
+            SILENT(true, "M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 21h4M3 3l18 18"),
+            BATTERY_LOW(true, "M4 8h14v8H4zM20 11v2M7 11v2"),
+            DOT(false, "M12 8a4 4 0 1 1 0 8a4 4 0 1 1 0-8z"),
             NOTE(false, "M9 17.5V6l10-2v11.5a2.6 2.6 0 1 1-1.8-2.5V7.6L10.8 8.9v8.6a2.6 2.6 0 1 1-1.8-2.5z"),
         }
 

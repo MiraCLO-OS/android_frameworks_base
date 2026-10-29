@@ -77,6 +77,10 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
     private ArrayList<View> mMeasureViews = new ArrayList<>();
     // Any ignored icon will never be added as a child
     private Set<String> mIgnoredSlots = new HashSet<>();
+    // MiraCLO: Dynamic Island pills showing (IslandStatusBarSpace mode), and the one network
+    // slot kept beside a lone main pill.
+    private int mIslandMode = 0;
+    @Nullable private String mIslandKeepSlot;
 
     private Configuration mConfiguration;
 
@@ -158,6 +162,7 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         mMeasureViews.clear();
+        updateIslandKeepSlot();
         int widthMode = MeasureSpec.getMode(widthMeasureSpec);
         final int specWidth = MeasureSpec.getSize(widthMeasureSpec);
         final int count = getChildCount();
@@ -165,7 +170,8 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
         for (int i = 0; i < count; i++) {
             StatusIconDisplayable icon = (StatusIconDisplayable) getChildAt(i);
             if (icon.isIconVisible() && !icon.isIconBlocked()
-                    && !mIgnoredSlots.contains(icon.getSlot())) {
+                    && !mIgnoredSlots.contains(icon.getSlot())
+                    && !isIslandHidden(icon.getSlot())) {
                 mMeasureViews.add((View) icon);
             }
         }
@@ -311,6 +317,41 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
     }
 
     /**
+     * MiraCLO: while Dynamic Island pills show, keep only one network icon (Wi-Fi, else mobile)
+     * beside a lone main pill, and no icons at all beside side pills. The battery is not in this
+     * container and always stays.
+     *
+     * @param mode 0 none, 1 main pill only, 2 side pills too (IslandStatusBarSpace)
+     */
+    public void setIslandMode(int mode) {
+        if (mode == mIslandMode) return;
+        mIslandMode = mode;
+        requestLayout();
+    }
+
+    private boolean isIslandHidden(String slot) {
+        if (mIslandMode == 0) return false;
+        if (mIslandMode >= 2) return true;
+        return !slot.equals(mIslandKeepSlot);
+    }
+
+    /** The network slot to keep beside a lone main pill: Wi-Fi when it shows, else mobile. */
+    private void updateIslandKeepSlot() {
+        final String wifi = mContext.getString(com.android.internal.R.string.status_bar_wifi);
+        final String mobile = mContext.getString(com.android.internal.R.string.status_bar_mobile);
+        String keep = mobile;
+        for (int i = 0; i < getChildCount(); i++) {
+            StatusIconDisplayable icon = (StatusIconDisplayable) getChildAt(i);
+            if (wifi.equals(icon.getSlot()) && icon.isIconVisible() && !icon.isIconBlocked()
+                    && !mIgnoredSlots.contains(wifi)) {
+                keep = wifi;
+                break;
+            }
+        }
+        mIslandKeepSlot = keep;
+    }
+
+    /**
      * Calculates the X translation for each icon view.
      *
      * <p>This is done by iterating through the children from right to left, giving each icon view a
@@ -333,7 +374,8 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
             StatusIconState childState = getViewStateFromChild(child);
 
             if (!iconView.isIconVisible() || iconView.isIconBlocked()
-                    || mIgnoredSlots.contains(iconView.getSlot())) {
+                    || mIgnoredSlots.contains(iconView.getSlot())
+                    || isIslandHidden(iconView.getSlot())) {
                 childState.visibleState = STATE_HIDDEN;
                 if (DEBUG) Log.d(TAG, "skipping child (" + iconView.getSlot() + ") not visible");
                 continue;

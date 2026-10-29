@@ -80,11 +80,9 @@ public class PhoneStatusBarView extends FrameLayout {
      */
     private int mCutoutSideNudge = 0;
 
-    /** MiraCLO: the Dynamic Island asked for more (or less) room around the camera. */
-    private final Runnable mIslandSpaceListener = () -> {
-        updateCutoutLocation();
-        requestLayout();
-    };
+    /** MiraCLO: the Dynamic Island's pills appeared, changed or left. */
+    private final Runnable mIslandSpaceListener = this::applyIslandMode;
+    private int mIslandMode = IslandStatusBarSpace.NONE;
 
     public PhoneStatusBarView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -136,6 +134,7 @@ public class PhoneStatusBarView extends FrameLayout {
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         IslandStatusBarSpace.addListener(mIslandSpaceListener);
+        applyIslandMode();
         if (updateDisplayParameters()) {
             updateLayoutForCutout();
         }
@@ -363,20 +362,8 @@ public class PhoneStatusBarView extends FrameLayout {
             hasCornerCutout = true;
         }
 
-        // MiraCLO: while Dynamic Island pills show, the gap around the camera covers them, so
-        // the clock and battery stay and the icons that would collide go to the overflow dot.
-        final int islandWidth = IslandStatusBarSpace.width();
-
         if (mDisplayCutout == null || mDisplayCutout.isEmpty() || hasCornerCutout) {
-            if (islandWidth <= 0) {
-                mCutoutSpace.setVisibility(View.GONE);
-                return;
-            }
-            mCutoutSpace.setVisibility(View.VISIBLE);
-            LinearLayout.LayoutParams islandLp =
-                    (LinearLayout.LayoutParams) mCutoutSpace.getLayoutParams();
-            islandLp.width = islandWidth;
-            islandLp.height = ViewGroup.LayoutParams.MATCH_PARENT;
+            mCutoutSpace.setVisibility(View.GONE);
             return;
         }
 
@@ -387,8 +374,35 @@ public class PhoneStatusBarView extends FrameLayout {
 
         bounds.left = bounds.left + mCutoutSideNudge;
         bounds.right = bounds.right - mCutoutSideNudge;
-        lp.width = Math.max(bounds.width(), islandWidth);
+        lp.width = bounds.width();
         lp.height = bounds.height();
+    }
+
+    /**
+     * MiraCLO: while Dynamic Island pills show, keep only the clock on the left and the battery
+     * (plus one network icon beside a lone main pill) on the right. Everything else fades out
+     * where it is, so nothing slides under a pill; it all fades back when the pills go.
+     */
+    private void applyIslandMode() {
+        final int mode = IslandStatusBarSpace.mode();
+        if (mode == mIslandMode) return;
+        mIslandMode = mode;
+        final boolean hide = mode != IslandStatusBarSpace.NONE;
+        // Notification icons and the status bar chips share this container; the clock does not.
+        fadeForIsland(findViewById(R.id.start_side_notif_and_chip_container), hide);
+        // The network speed's holder is faded by other code, so fade the text inside it.
+        fadeForIsland(findViewById(R.id.network_traffic), hide);
+        StatusIconContainer icons = findViewById(R.id.statusIcons);
+        if (icons != null) icons.setIslandMode(mode);
+    }
+
+    private static void fadeForIsland(@Nullable View view, boolean hide) {
+        if (view == null) return;
+        view.animate().cancel();
+        view.animate()
+                .alpha(hide ? 0f : 1f)
+                .setDuration(hide ? 120 : 180)
+                .start();
     }
 
     private void updateSafeInsets() {

@@ -38,12 +38,16 @@ import com.android.systemui.media.controls.domain.pipeline.MediaDataManager
 import com.android.systemui.media.controls.shared.model.MediaData
 import com.android.systemui.plugins.ActivityStarter
 import com.android.systemui.plugins.statusbar.StatusBarStateController
+import com.android.systemui.screenrecord.ScreenRecordUxController
 import com.android.systemui.shade.ShadeExpansionStateManager
 import com.android.systemui.shared.system.TaskStackChangeListener
 import com.android.systemui.shared.system.TaskStackChangeListeners
 import com.android.systemui.statusbar.CommandQueue
 import com.android.systemui.statusbar.NotificationListener
 import com.android.systemui.statusbar.StatusBarState
+import com.android.systemui.statusbar.notification.collection.NotificationEntry
+import com.android.systemui.statusbar.notification.interruption.NotificationInterruptSuppressor
+import com.android.systemui.statusbar.notification.interruption.VisualInterruptionDecisionProvider
 import java.util.concurrent.Executor
 import javax.inject.Inject
 
@@ -83,11 +87,39 @@ constructor(
     private val shadeExpansionStateManager: ShadeExpansionStateManager,
     private val statusBarStateController: StatusBarStateController,
     private val activityStarter: ActivityStarter,
+    private val screenRecordController: ScreenRecordUxController,
+    private val interruptionDecisionProvider: VisualInterruptionDecisionProvider,
     @Main private val mainHandler: Handler,
     @Background private val bgExecutor: Executor,
 ) : CoreStartable, MediaDataManager.Listener, NotificationListener.NotificationHandler {
 
     private val reader = IslandNotificationReader(context)
+
+    /** The island's own activities: screen recording and short system moments. */
+    private val systemSources by lazy {
+        IslandSystemSources(
+            context,
+            mainHandler,
+            screenRecordController,
+            object : IslandSystemSources.Sink {
+                override fun put(activity: IslandActivity) = putActivity(activity)
+
+                override fun remove(key: String) = removeActivity(key)
+            },
+        )
+    }
+
+    /**
+     * A notification the island shows does not also pop up as a heads-up (or, for an incoming
+     * call, as the call heads-up): it lives only in the island (and in the shade as usual).
+     */
+    private val headsUpSuppressor =
+        object : NotificationInterruptSuppressor {
+            override fun getName() = "MiraCLOIsland"
+
+            override fun suppressAwakeHeadsUp(entry: NotificationEntry): Boolean =
+                islandTakesOver(entry.sbn)
+        }
 
     // Settings ------------------------------------------------------------------------------------
 
@@ -98,6 +130,9 @@ constructor(
     private var hideWhileOpen = true
     private var severalActivities = true
     private var pausedTimeout = true
+    private var showScreenRecord = true
+    private var showLive = true
+    private var showProgress = true
     private var config = MiraCLOIslandView.Config()
 
     // Global conditions ---------------------------------------------------------------------------
@@ -174,6 +209,8 @@ constructor(
 
         mediaDataManager.addListener(this)
         notificationListener.addNotificationHandler(this)
+        interruptionDecisionProvider.addLegacySuppressor(headsUpSuppressor)
+        systemSources.start()
         // Notifications already posted before we were listening.
         mainHandler.post {
             try {
@@ -251,9 +288,17 @@ constructor(
         hideWhileOpen = on(KEY_HIDE_WHILE_OPEN, 1)
         severalActivities = on(KEY_SEVERAL, 1)
         pausedTimeout = on(KEY_PAUSED_TIMEOUT, 1)
+        showScreenRecord = on(KEY_SCREEN_RECORD, 1)
+        showLive = on(KEY_LIVE, 1)
+        showProgress = on(KEY_PROGRESS, 1)
+        systemSources.chargingEnabled = on(KEY_CHARGING, 1)
+        systemSources.earbudsEnabled = on(KEY_EARBUDS, 1)
+        systemSources.ringerEnabled = on(KEY_RINGER, 1)
+        systemSources.lowBatteryEnabled = on(KEY_LOW_BATTERY, 1)
         config =
             MiraCLOIslandView.Config(
                 touchGlow = on(KEY_TOUCH_GLOW, 1),
+                glass = on(KEY_GLASS, 0),
                 ambientGlow = on(KEY_AMBIENT_GLOW, 1),
                 haptics = on(KEY_HAPTICS, 1),
             )
@@ -277,9 +322,15 @@ constructor(
                 try {
                     ActivityTaskManager.getInstance()
                         .getTasks(MAX_TASKS)
+                        // The app the user is in: the focused task, plus split-screen halves.
+                        // isVisibleRequested drops as soon as an app is sent away (isVisible
+                        // stays true through its closing animation, and some apps, like
+                        // YouTube's mini player, keep a window that stays "visible").
                         .filter {
-                            it.isVisible() &&
-                                it.windowingMode != WindowConfiguration.WINDOWING_MODE_PINNED
+                            it.isVisibleRequested &&
+                                it.windowingMode != WindowConfiguration.WINDOWING_MODE_PINNED &&
+                                (it.isFocused ||
+                                    it.windowingMode == WindowConfiguration.WINDOWING_MODE_MULTI_WINDOW)
                         }
                         .mapNotNull { it.topActivity?.packageName }
                         .toSet()
@@ -456,13 +507,38 @@ constructor(
         update()
     }
 
+    private fun kindEnabled(kind: IslandKind): Boolean =
+        when (kind) {
+            IslandKind.MEDIA -> showMedia
+            IslandKind.CALL -> showCalls
+            IslandKind.TIMER,
+            IslandKind.STOPWATCH -> showTimers
+            IslandKind.SCREEN_RECORD -> showScreenRecord
+            IslandKind.LIVE -> showLive
+            IslandKind.PROGRESS -> showProgress
+            // Each system moment has its own switch, checked where it starts.
+            IslandKind.SYSTEM -> true
+        }
+
+    /**
+     * Whether the island shows this notification right now, so its heads-up can give way. Decided
+     * at once from the notification's fields; the island reads it fully a moment later.
+     */
+    private fun islandTakesOver(sbn: StatusBarNotification): Boolean {
+        if (!islandEnabled || !isPortrait() || !statusBarShowing || dozing || shadeOpen ||
+            barState != StatusBarState.SHADE
+        ) {
+            return false
+        }
+        val kind = reader.quickKind(sbn) ?: return false
+        if (!kindEnabled(kind)) return false
+        // In the app itself the island steps aside, so the app's own heads-up rules apply.
+        if (hideWhileOpen && isOnScreen(sbn.packageName)) return false
+        return true
+    }
+
     private fun isShown(a: IslandActivity): Boolean =
-        when (a.kind) {
-                IslandKind.MEDIA -> showMedia
-                IslandKind.CALL -> showCalls
-                IslandKind.TIMER,
-                IslandKind.STOPWATCH -> showTimers
-            } &&
+        kindEnabled(a.kind) &&
             !dismissed.containsKey(a.key) &&
             !(hideWhileOpen && isOnScreen(a.packageName)) &&
             !(a.kind == IslandKind.MEDIA && isPausedTooLong())
@@ -478,6 +554,7 @@ constructor(
         // Removed only when it cannot show at all; otherwise faded, so it never re-grows.
         if (!islandEnabled || !isPortrait()) {
             cards.clear()
+            publishChipFilter(emptyList())
             removeWindow()
             return
         }
@@ -487,13 +564,15 @@ constructor(
                 .filter { isShown(it) }
                 .take(if (severalActivities) MAX_VISIBLE else 1)
         cards.retainAll { key -> visible.any { it.key == key } }
+        publishChipFilter(visible)
 
         val shown = statusBarShowing && !dozing && barState == StatusBarState.SHADE
         // Cards fold away while hidden or while the shade comes down over them.
         if (!shown || shadeOpen) cards.clear()
 
         if (visible.isEmpty() && view == null) return
-        val pills = visible.filter { it.key !in cards }
+        // Pills keep their slots (main, right, left); one open as a card leaves its slot empty.
+        val pills = visible.map { if (it.key in cards) null else it }
         val openCards = cards.mapNotNull { key -> visible.firstOrNull { it.key == key } }
         val fresh = view == null
         val v = view ?: addWindow() ?: return
@@ -501,6 +580,17 @@ constructor(
         // A new window starts as it should be; an existing one fades.
         v.setShown(shown, animate = !fresh)
         v.render(MiraCLOIslandView.State(pills = pills, cards = openCards))
+    }
+
+    /** The status bar leaves out the chips of what the island shows (see [IslandChipFilter]). */
+    private fun publishChipFilter(visible: List<IslandActivity>) {
+        IslandChipFilter.set(
+            IslandChipFilter.State(
+                hideCall = visible.any { it.kind == IslandKind.CALL },
+                hideScreenRecord = visible.any { it.kind == IslandKind.SCREEN_RECORD },
+                notificationKeys = visible.map { it.key }.toSet(),
+            )
+        )
     }
 
     // Window -------------------------------------------------------------------------------------------
@@ -557,7 +647,7 @@ constructor(
 
             override fun onAction(key: String, action: IslandAction) {
                 try {
-                    action.intent.send()
+                    action.run?.invoke() ?: action.intent?.send()
                 } catch (e: PendingIntent.CanceledException) {
                     Log.w(TAG, "Action no longer available", e)
                 }
@@ -670,6 +760,14 @@ constructor(
         const val KEY_AMBIENT_GLOW = "miraclo_island_ambient_glow"
         const val KEY_HAPTICS = "miraclo_island_haptics"
         const val KEY_PAUSED_TIMEOUT = "miraclo_island_paused_timeout"
+        const val KEY_SCREEN_RECORD = "miraclo_island_screen_record"
+        const val KEY_LIVE = "miraclo_island_live_updates"
+        const val KEY_PROGRESS = "miraclo_island_progress"
+        const val KEY_CHARGING = "miraclo_island_charging"
+        const val KEY_EARBUDS = "miraclo_island_earbuds"
+        const val KEY_RINGER = "miraclo_island_ringer"
+        const val KEY_LOW_BATTERY = "miraclo_island_low_battery"
+        const val KEY_GLASS = "miraclo_island_glass"
 
         private val ALL_KEYS =
             listOf(
@@ -683,6 +781,14 @@ constructor(
                 KEY_AMBIENT_GLOW,
                 KEY_HAPTICS,
                 KEY_PAUSED_TIMEOUT,
+                KEY_SCREEN_RECORD,
+                KEY_LIVE,
+                KEY_PROGRESS,
+                KEY_CHARGING,
+                KEY_EARBUDS,
+                KEY_RINGER,
+                KEY_LOW_BATTERY,
+                KEY_GLASS,
             )
     }
 }

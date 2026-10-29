@@ -37,16 +37,56 @@ class IslandNotificationReader(private val context: Context) {
 
     fun read(sbn: StatusBarNotification): IslandActivity? =
         try {
-            readCall(sbn) ?: if (isClockApp(sbn.packageName)) readClock(sbn) else null
+            when (quickKind(sbn)) {
+                IslandKind.CALL -> readCall(sbn)
+                IslandKind.TIMER -> readClock(sbn)
+                IslandKind.LIVE,
+                IslandKind.PROGRESS -> readGeneric(sbn)
+                else -> null
+            }
         } catch (e: RuntimeException) {
             Log.w(TAG, "Could not read ${sbn.key}", e)
             null
         }
 
     /** Whether [read] can ever return something for this notification (cheap pre-check). */
-    fun isCandidate(sbn: StatusBarNotification): Boolean =
-        sbn.notification.extras.getInt(Notification.EXTRA_CALL_TYPE, 0) != 0 ||
-            isClockApp(sbn.packageName)
+    fun isCandidate(sbn: StatusBarNotification): Boolean = quickKind(sbn) != null
+
+    /**
+     * What kind of activity a notification would become, decided cheaply on the calling thread
+     * (no layout inflation): CALL, TIMER (any Clock timer or stopwatch), LIVE, PROGRESS or null.
+     * Used before reading, and to decide whether its heads-up should give way to the island.
+     */
+    fun quickKind(sbn: StatusBarNotification): IslandKind? {
+        val n = sbn.notification
+        val extras = n.extras
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return null
+        val callType = extras.getInt(Notification.EXTRA_CALL_TYPE, 0)
+        if (callType == Notification.CallStyle.CALL_TYPE_INCOMING ||
+            callType == Notification.CallStyle.CALL_TYPE_ONGOING ||
+            callType == Notification.CallStyle.CALL_TYPE_SCREENING
+        ) {
+            return IslandKind.CALL
+        }
+        if (isClockApp(sbn.packageName)) return IslandKind.TIMER
+        // The system's own notifications (screen recorder, USB, ...) are handled elsewhere.
+        if (sbn.packageName == "android" || sbn.packageName == SYSTEMUI) return null
+        if (extras.containsKey(Notification.EXTRA_MEDIA_SESSION)) return null
+        if (n.isPromotedOngoing) return IslandKind.LIVE
+        val ongoing =
+            n.flags and (Notification.FLAG_ONGOING_EVENT or Notification.FLAG_FOREGROUND_SERVICE) != 0
+        if (!ongoing) return null
+        if (progressOf(n) != null) return IslandKind.PROGRESS
+        if (extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER) && n.`when` > 0) return IslandKind.PROGRESS
+        return null
+    }
+
+    private fun progressOf(n: Notification): Float? {
+        val extras = n.extras
+        val max = extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0)
+        if (max <= 0 || extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE)) return null
+        return (extras.getInt(Notification.EXTRA_PROGRESS, 0).toFloat() / max).coerceIn(0f, 1f)
+    }
 
     // Calls ---------------------------------------------------------------------------------------
 
@@ -54,12 +94,7 @@ class IslandNotificationReader(private val context: Context) {
         val n = sbn.notification
         val extras = n.extras
         val type = extras.getInt(Notification.EXTRA_CALL_TYPE, 0)
-        // Stage 1: ongoing calls (and call screening). Incoming calls keep their usual heads-up.
-        if (type != Notification.CallStyle.CALL_TYPE_ONGOING &&
-            type != Notification.CallStyle.CALL_TYPE_SCREENING
-        ) {
-            return null
-        }
+        val incoming = type == Notification.CallStyle.CALL_TYPE_INCOMING
         val person = extras.getParcelable(Notification.EXTRA_CALL_PERSON, Person::class.java)
         val name =
             person?.name?.takeIf { it.isNotBlank() }
@@ -83,9 +118,19 @@ class IslandNotificationReader(private val context: Context) {
 
         val hangUp = extras.getParcelable(Notification.EXTRA_HANG_UP_INTENT, PendingIntent::class.java)
         val actions =
-            listOfNotNull(
-                hangUp?.let { IslandAction("End call", null, it, IslandAction.Style.DANGER) }
-            )
+            if (incoming) {
+                // Decline (red), then Answer (green), like the call screen.
+                val decline = extras.getParcelable(Notification.EXTRA_DECLINE_INTENT, PendingIntent::class.java)
+                val answer = extras.getParcelable(Notification.EXTRA_ANSWER_INTENT, PendingIntent::class.java)
+                listOfNotNull(
+                    (decline ?: hangUp)?.let { IslandAction("Decline", null, it, IslandAction.Style.DANGER) },
+                    answer?.let { IslandAction("Answer", null, it, IslandAction.Style.PRIMARY) },
+                )
+            } else {
+                listOfNotNull(
+                    hangUp?.let { IslandAction("End call", null, it, IslandAction.Style.DANGER) }
+                )
+            }
 
         return IslandActivity(
             key = sbn.key,
@@ -93,11 +138,16 @@ class IslandNotificationReader(private val context: Context) {
             packageName = sbn.packageName,
             accent = CALL_GREEN,
             title = name,
-            subtitle = if (clock == null) extras.getCharSequence(Notification.EXTRA_TEXT) else null,
+            subtitle =
+                if (incoming) INCOMING
+                else if (clock == null) extras.getCharSequence(Notification.EXTRA_TEXT) else null,
             art = photo,
-            clock = clock,
+            clock = if (incoming) null else clock,
             actions = actions,
             contentIntent = n.contentIntent,
+            // An incoming call opens its card by itself; it becomes a normal call once answered.
+            alert = incoming,
+            signature = if (incoming) "${sbn.key}|incoming" else sbn.key,
         )
     }
 
@@ -194,6 +244,82 @@ class IslandNotificationReader(private val context: Context) {
         }
     }
 
+    // Live updates, downloads, transfers, recorders --------------------------------------------------
+
+    /**
+     * Any app's live update (Android 16 promoted notification) or ongoing notification with a
+     * progress bar or a running time. Uses only the notification's standard fields, so it works
+     * for every app that follows the platform's notification styles.
+     */
+    private fun readGeneric(sbn: StatusBarNotification): IslandActivity? {
+        val n = sbn.notification
+        val extras = n.extras
+        val kind = if (n.isPromotedOngoing) IslandKind.LIVE else IslandKind.PROGRESS
+        val title =
+            extras.getCharSequence(Notification.EXTRA_TITLE)?.takeIf { it.isNotBlank() }
+                ?: return null
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)
+        val progress = progressOf(n)
+        val clock =
+            if (extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER) && n.`when` > 0) {
+                val now = SystemClock.elapsedRealtime()
+                val base = now - (System.currentTimeMillis() - n.`when`)
+                val down = extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN)
+                IslandClock(base, down, true, if (down) base - now else now - base)
+            } else {
+                null
+            }
+        val value =
+            extras.getCharSequence(Notification.EXTRA_SHORT_CRITICAL_TEXT)?.takeIf { it.isNotBlank() }
+                ?: progress?.let { "${(it * 100).toInt()}%" }
+        val accent = accentOf(n)
+        val large = n.getLargeIcon()?.loadDrawable(context)?.let { toBitmap(it, AVATAR_PX) }
+        val small = n.smallIcon?.loadDrawable(context)?.mutate()
+        val actions =
+            n.actions
+                .orEmpty()
+                .filter { it.actionIntent != null && !it.title.isNullOrBlank() }
+                .take(2)
+                .map { a ->
+                    val stop = STOP_WORDS.any { w -> a.title.toString().contains(w, ignoreCase = true) } ||
+                        CANCEL_WORDS.any { w -> a.title.toString().contains(w, ignoreCase = true) }
+                    IslandAction(
+                        label = a.title,
+                        icon = null,
+                        intent = a.actionIntent,
+                        style = if (stop) IslandAction.Style.NEUTRAL else IslandAction.Style.PRIMARY,
+                    )
+                }
+        return IslandActivity(
+            key = sbn.key,
+            kind = kind,
+            packageName = sbn.packageName,
+            accent = accent,
+            title = title,
+            subtitle = text,
+            art = large,
+            clock = clock,
+            actions = actions,
+            contentIntent = n.contentIntent,
+            icon = small,
+            progress = progress,
+            value = value,
+            // A new title (next turn, new status) counts as something new.
+            signature = "${sbn.key}|$title",
+        )
+    }
+
+    /** The app's notification colour, made bright enough for the dark island. */
+    private fun accentOf(n: Notification): Int {
+        val c = n.color
+        if (c == Notification.COLOR_DEFAULT || c == 0) return DEFAULT_ACCENT
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(c, hsv)
+        hsv[2] = maxOf(hsv[2], 0.85f)
+        if (hsv[1] < 0.15f) return DEFAULT_ACCENT
+        return android.graphics.Color.HSVToColor(hsv)
+    }
+
     private fun findChronometer(view: View): Chronometer? {
         if (view is Chronometer) return view
         if (view is ViewGroup) {
@@ -233,6 +359,10 @@ class IslandNotificationReader(private val context: Context) {
         private const val TIMES_UP = "Time's up"
         private const val ALERT_SLACK_MS = 500L
         private val STOP_WORDS = listOf("stop", "dismiss")
+        private val CANCEL_WORDS = listOf("cancel", "end", "exit")
+        private const val INCOMING = "Incoming call"
+        private const val SYSTEMUI = "com.android.systemui"
+        private val DEFAULT_ACCENT = 0xFF7DD3FC.toInt()
 
         private val CLOCK_PACKAGES = setOf("com.google.android.deskclock", "com.android.deskclock")
 

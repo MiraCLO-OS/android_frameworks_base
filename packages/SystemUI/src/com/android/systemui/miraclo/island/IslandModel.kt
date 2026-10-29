@@ -11,12 +11,34 @@ import android.graphics.drawable.Drawable
 import android.os.SystemClock
 import com.android.systemui.media.controls.shared.model.MediaData
 
+/** Icons the island draws itself, for activities that do not come with an app icon. */
+enum class IslandSymbol {
+    RECORD,
+    BOLT,
+    EARBUDS,
+    BELL,
+    VIBRATE,
+    SILENT,
+    BATTERY_LOW,
+}
+
 /** What an island activity is; decides its pill, its card and its colour. */
 enum class IslandKind {
     MEDIA,
     CALL,
     TIMER,
     STOPWATCH,
+    /** The built-in screen recorder: countdown, recording, saved. */
+    SCREEN_RECORD,
+    /** An app's Android 16 live update (navigation, rides, delivery, ...). */
+    LIVE,
+    /**
+     * An ongoing notification with a progress bar or a running time (downloads, Quick Share,
+     * voice recorders, workouts, ...).
+     */
+    PROGRESS,
+    /** A short system moment: charging, earbuds connected, ringer mode, low battery. */
+    SYSTEM,
 }
 
 /**
@@ -59,8 +81,10 @@ data class IslandClock(
 data class IslandAction(
     val label: CharSequence,
     val icon: Drawable?,
-    val intent: PendingIntent,
+    /** The app's own action; null for the island's own actions, which use [run]. */
+    val intent: PendingIntent?,
     val style: Style,
+    val run: (() -> Unit)? = null,
 ) {
     enum class Style {
         /** Filled with the activity colour (pause, resume). */
@@ -98,8 +122,18 @@ data class IslandActivity(
      * away comes back when this changes.
      */
     val signature: String = key,
-    /** Needs the user now (a timer's "Time's up"): its card opens by itself and it shows red. */
+    /** Needs the user now (a timer's "Time's up", an incoming call): its card opens by itself. */
     val alert: Boolean = false,
+    /** The app's icon (live updates, downloads, system moments), tinted with [accent]. */
+    val icon: Drawable? = null,
+    /** 0..1 when the activity has a determinate progress bar. */
+    val progress: Float? = null,
+    /** Short text for the pill ("200 m", "4 min", "64%") when there is no running [clock]. */
+    val value: CharSequence? = null,
+    /** Leaves by itself at this uptime (system moments); 0 = stays. */
+    val expiresAt: Long = 0L,
+    /** The island's own icon for its own activities (screen recording, system moments). */
+    val symbol: IslandSymbol? = null,
 ) {
     val playing: Boolean
         get() = media?.isPlaying == true || clock?.running == true

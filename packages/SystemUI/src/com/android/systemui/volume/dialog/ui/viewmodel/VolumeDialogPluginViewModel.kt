@@ -16,9 +16,12 @@
 
 package com.android.systemui.volume.dialog.ui.viewmodel
 
+import android.app.Dialog
+import android.content.Context
 import android.content.IntentFilter
 import com.android.internal.logging.UiEventLogger
 import com.android.systemui.broadcast.BroadcastDispatcher
+import com.android.systemui.dagger.qualifiers.Application
 import com.android.systemui.settings.brightness.BrightnessDialog.ACTION_BRIGHTNESS_DIALOG_SHOWING
 import com.android.systemui.settings.brightness.BrightnessDialog.PERMISSION_SELF
 import com.android.systemui.volume.Events
@@ -29,6 +32,7 @@ import com.android.systemui.volume.dialog.domain.interactor.ExpandedAudioTileDet
 import com.android.systemui.volume.dialog.domain.interactor.VolumeDialogCsdWarningInteractor
 import com.android.systemui.volume.dialog.domain.interactor.VolumeDialogSafetyWarningInteractor
 import com.android.systemui.volume.dialog.domain.interactor.VolumeDialogVisibilityInteractor
+import com.android.systemui.volume.dialog.miraclo.MiraCLOVolumeDialog
 import com.android.systemui.volume.dialog.shared.VolumeDialogLogger
 import com.android.systemui.volume.dialog.shared.model.CsdWarningConfigModel
 import com.android.systemui.volume.dialog.shared.model.VolumeDialogVisibilityModel
@@ -55,6 +59,8 @@ constructor(
     val csdWarningConfigModel: CsdWarningConfigModel,
     private val uiEventLogger: UiEventLogger,
     private val broadcastDispatcher: BroadcastDispatcher,
+    @Application private val context: Context,
+    private val miracloVolumeDialogFactory: MiraCLOVolumeDialog.Factory,
     expandedAudioTileDetailsFeatureInteractor: ExpandedAudioTileDetailsFeatureInteractor,
 ) {
 
@@ -102,8 +108,14 @@ constructor(
     }
 
     private suspend fun showDialog(): Unit = suspendCoroutine { continuation ->
-        volumeDialogFactory
-            .create(isVolumeDialogVertical)
+        // MiraCLO: the One UI style panel replaces the stock one unless it is turned off.
+        val dialog: Dialog =
+            if (isVolumeDialogVertical && MiraCLOVolumeDialog.isEnabled(context)) {
+                miracloVolumeDialogFactory.create()
+            } else {
+                volumeDialogFactory.create(isVolumeDialogVertical)
+            }
+        dialog
             .apply {
                 setOnDismissListener {
                     dialogVisibilityInteractor.dismissDialog(Events.DISMISS_REASON_UNKNOWN)

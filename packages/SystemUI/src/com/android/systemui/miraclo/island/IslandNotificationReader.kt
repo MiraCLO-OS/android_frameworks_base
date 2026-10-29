@@ -157,7 +157,10 @@ class IslandNotificationReader(private val context: Context) {
     private fun readClock(sbn: StatusBarNotification): IslandActivity? {
         val n = sbn.notification
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return null
-        val remote = n.contentView ?: n.bigContentView ?: return null
+        // Newer Clock versions post the Android 17 metric style (no custom layout): read the time
+        // straight from it.
+        metricClock(n)?.let { (clock, label) -> return clockActivity(sbn, clock, label) }
+        val remote = n.contentView ?: n.bigContentView ?: return readFiredTimer(sbn, null)
         val root = remote.apply(context, null)
         // Other Clock notifications (alarms) have no chronometer; a timer that went off may not
         // either, depending on the Clock version.
@@ -173,15 +176,30 @@ class IslandNotificationReader(private val context: Context) {
         val alert = countDown && ms <= ALERT_SLACK_MS
         val running = alert || (isStarted(chrono) ?: !n.sortKey.orEmpty().contains("PAUSED"))
         val clock = IslandClock(chrono.base, countDown, running, ms)
-        val kind = if (countDown) IslandKind.TIMER else IslandKind.STOPWATCH
+        return clockActivity(sbn, clock, null, alertOverride = alert)
+    }
 
+    /** A Clock timer or stopwatch activity for [clock]; [label] is the app's own name for it. */
+    private fun clockActivity(
+        sbn: StatusBarNotification,
+        clock: IslandClock,
+        label: CharSequence?,
+        alertOverride: Boolean? = null,
+    ): IslandActivity {
+        val n = sbn.notification
+        val countDown = clock.countDown
+        // A count-down at (or past) zero is a timer that went off: "Time's up".
+        val alert = alertOverride ?: (countDown && clock.millis() <= ALERT_SLACK_MS)
+        val kind = if (countDown) IslandKind.TIMER else IslandKind.STOPWATCH
+        val plain = if (kind == IslandKind.TIMER) "Timer" else "Stopwatch"
         return IslandActivity(
             key = sbn.key,
             kind = kind,
             packageName = sbn.packageName,
             accent = if (alert) ALERT_RED else if (kind == IslandKind.TIMER) TIMER_ORANGE else STOPWATCH_BLUE,
-            title = if (alert) TIMES_UP else if (kind == IslandKind.TIMER) "Timer" else "Stopwatch",
-            subtitle = null,
+            title = if (alert) TIMES_UP else plain,
+            // "70h timer": the app's own label, when it says more than "Timer".
+            subtitle = label?.takeIf { it.isNotBlank() && !it.toString().equals(plain, ignoreCase = true) },
             art = null,
             clock = clock,
             actions = clockActions(n, alert),
@@ -191,9 +209,9 @@ class IslandNotificationReader(private val context: Context) {
     }
 
     /** A Clock timer that went off, posted without a chronometer: "Time's up" plus its buttons. */
-    private fun readFiredTimer(sbn: StatusBarNotification, root: View): IslandActivity? {
+    private fun readFiredTimer(sbn: StatusBarNotification, root: View?): IslandActivity? {
         val n = sbn.notification
-        val texts = ArrayList<String>().also { collectTexts(root, it) }
+        val texts = ArrayList<String>().also { if (root != null) collectTexts(root, it) }
         n.extras.getCharSequence(Notification.EXTRA_TITLE)?.let { texts.add(it.toString()) }
         n.extras.getCharSequence(Notification.EXTRA_TEXT)?.let { texts.add(it.toString()) }
         val timesUp = texts.any { it.contains("time's up", ignoreCase = true) || it.contains("times up", ignoreCase = true) }
@@ -257,18 +275,21 @@ class IslandNotificationReader(private val context: Context) {
         val kind = if (n.isPromotedOngoing) IslandKind.LIVE else IslandKind.PROGRESS
         val title =
             extras.getCharSequence(Notification.EXTRA_TITLE)?.takeIf { it.isNotBlank() }
+                ?: metricClock(n)?.second?.takeIf { it.isNotBlank() }
                 ?: return null
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)
         val progress = progressOf(n)
+        val metric = metricClock(n)
         val clock =
-            if (extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER) && n.`when` > 0) {
-                val now = SystemClock.elapsedRealtime()
-                val base = now - (System.currentTimeMillis() - n.`when`)
-                val down = extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN)
-                IslandClock(base, down, true, if (down) base - now else now - base)
-            } else {
-                null
-            }
+            metric?.first
+                ?: if (extras.getBoolean(Notification.EXTRA_SHOW_CHRONOMETER) && n.`when` > 0) {
+                    val now = SystemClock.elapsedRealtime()
+                    val base = now - (System.currentTimeMillis() - n.`when`)
+                    val down = extras.getBoolean(Notification.EXTRA_CHRONOMETER_COUNT_DOWN)
+                    IslandClock(base, down, true, if (down) base - now else now - base)
+                } else {
+                    null
+                }
         val value =
             extras.getCharSequence(Notification.EXTRA_SHORT_CRITICAL_TEXT)?.takeIf { it.isNotBlank() }
                 ?: progress?.let { "${(it * 100).toInt()}%" }
@@ -320,6 +341,44 @@ class IslandNotificationReader(private val context: Context) {
         return android.graphics.Color.HSVToColor(hsv)
     }
 
+    /**
+     * The time in an Android 17 metric style notification ([Notification.MetricStyle]): the
+     * critical metric if it is a time difference (timer, stopwatch, ...), plus its label. Read
+     * from the extras directly, as the platform stores them.
+     */
+    private fun metricClock(n: Notification): Pair<IslandClock, CharSequence?>? {
+        val extras = n.extras
+        val metrics = extras.getParcelableArrayList(EXTRA_METRICS, android.os.Bundle::class.java)
+            ?: return null
+        if (metrics.isEmpty()) return null
+        val index = extras.getInt(EXTRA_METRICS_CRITICAL, 0).takeIf { it in metrics.indices } ?: 0
+        val ordered = listOf(metrics[index]) + metrics.filterIndexed { i, _ -> i != index }
+        for (metric in ordered) {
+            val value = metric.getBundle("value") ?: continue
+            val countDown = value.getBoolean("countDown")
+            val now = SystemClock.elapsedRealtime()
+            val clock =
+                when {
+                    value.containsKey("zeroElapsedRealtime") -> {
+                        val base = value.getLong("zeroElapsedRealtime")
+                        IslandClock(base, countDown, true, if (countDown) base - now else now - base)
+                    }
+                    value.containsKey("zeroTime") -> {
+                        val base = now + (value.getLong("zeroTime") - System.currentTimeMillis())
+                        IslandClock(base, countDown, true, if (countDown) base - now else now - base)
+                    }
+                    value.containsKey("pausedDuration") -> {
+                        // Paused: the time stays still (remaining for a timer, elapsed otherwise).
+                        val ms = value.getLong("pausedDuration")
+                        IslandClock(if (countDown) now + ms else now - ms, countDown, false, ms)
+                    }
+                    else -> null
+                } ?: continue
+            return clock to metric.getCharSequence("label")
+        }
+        return null
+    }
+
     private fun findChronometer(view: View): Chronometer? {
         if (view is Chronometer) return view
         if (view is ViewGroup) {
@@ -351,6 +410,9 @@ class IslandNotificationReader(private val context: Context) {
 
     companion object {
         private const val TAG = "MiraCLOIsland"
+        /** Notification.EXTRA_METRICS / EXTRA_METRICS_CRITICAL_INDEX (hidden constants). */
+        private const val EXTRA_METRICS = "android.metrics"
+        private const val EXTRA_METRICS_CRITICAL = "android.metrics.criticalIndex"
         private const val AVATAR_PX = 128
         val CALL_GREEN = 0xFF4ADE80.toInt()
         val TIMER_ORANGE = 0xFFFB923C.toInt()

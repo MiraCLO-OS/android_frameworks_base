@@ -100,6 +100,9 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         /** Fold every card back into its pill (tap outside, swipe a card up). */
         fun onCollapseAll()
 
+        /** A recently played album on the music card: play it here, in place of the current one. */
+        fun onPlayRecent(recent: MediaData)
+
         /** A card button (pause, lap, end call, ...). */
         fun onAction(key: String, action: IslandAction)
 
@@ -1876,19 +1879,9 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 if (r != null) {
                     tile.setImageIcon(r.artwork)
                     tile.contentDescription = "Play ${r.song ?: r.app ?: ""}"
-                    tile.setOnClickListener {
-                        val resume = r.resumeAction
-                        if (resume != null) {
-                            resume.run()
-                        } else {
-                            try {
-                                r.clickIntent?.send()
-                            } catch (e: android.app.PendingIntent.CanceledException) {
-                                // The app is gone; nothing to open.
-                            }
-                        }
-                        host.onCollapseAll()
-                    }
+                    // Plays that song right here: it becomes the music card, and the one playing
+                    // now drops into this row. The card stays open.
+                    tile.setOnClickListener { host.onPlayRecent(r) }
                 } else {
                     tile.visibility = INVISIBLE
                 }

@@ -20,6 +20,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.media.session.MediaController
 import android.net.Uri
 import android.os.Handler
 import android.os.SystemClock
@@ -48,6 +49,7 @@ import com.android.systemui.statusbar.StatusBarState
 import com.android.systemui.statusbar.notification.collection.NotificationEntry
 import com.android.systemui.statusbar.notification.interruption.NotificationInterruptSuppressor
 import com.android.systemui.statusbar.notification.interruption.VisualInterruptionDecisionProvider
+import java.io.PrintWriter
 import java.util.concurrent.Executor
 import javax.inject.Inject
 
@@ -153,6 +155,8 @@ constructor(
     /** When the current music was paused (uptime), or 0 while it plays. */
     private var mediaPausedAt = 0L
     private var mediaPausedPackage: String? = null
+    /** The app picked from the music card's recent albums; it stays the music card until another starts playing. */
+    private var chosenPackage: String? = null
     private val pausedTimeoutRunnable = Runnable { update() }
 
     /** All live activities by key. */
@@ -277,6 +281,28 @@ constructor(
         )
     }
 
+    /**
+     * adb shell dumpsys activity service com.android.systemui/.SystemUIService MiraCLOIslandController
+     */
+    override fun dump(pw: PrintWriter, args: Array<out String>) {
+        pw.println("MiraCLOIslandController:")
+        pw.println("  enabled=$islandEnabled portrait=${isPortrait()} statusBarShowing=$statusBarShowing " +
+            "dozing=$dozing barState=$barState shadeOpen=$shadeOpen window=${view != null}")
+        pw.println("  foreground=$foregroundPackages launching=$launchingPackage chosen=$chosenPackage")
+        pw.println("  cards=$cards dismissed=${dismissed.keys}")
+        pw.println("  order (newest first):")
+        for (key in order) {
+            val a = activities[key] ?: continue
+            pw.println("    $key kind=${a.kind} pkg=${a.packageName} shown=${isShown(a)} " +
+                "title=${a.title} clock=${a.clock} value=${a.value} alert=${a.alert}")
+        }
+        pw.println("  media sessions:")
+        for ((k, d) in sessions) {
+            pw.println("    $k pkg=${d.packageName} active=${d.active} resumption=${d.resumption} " +
+                "playing=${d.isPlaying} song=${d.song}")
+        }
+    }
+
     private fun readSettings() {
         val user = ActivityManager.getCurrentUser()
         val r = context.contentResolver
@@ -360,6 +386,8 @@ constructor(
             if (oldKey != null && oldKey != key) sessions.remove(oldKey)
             sessions.remove(key)
             sessions[key] = data
+            // Something else started playing: it takes the music card again.
+            if (data.isPlaying == true && data.packageName != chosenPackage) chosenPackage = null
             refreshMedia()
         }
     }
@@ -374,7 +402,35 @@ constructor(
     /** The session to show: a playing one first, otherwise the latest active one. */
     private fun currentSession(): MediaData? {
         val active = sessions.values.filter { it.active && !it.resumption }
+        chosenPackage?.let { p -> active.lastOrNull { it.packageName == p }?.let { return it } }
         return active.lastOrNull { it.isPlaying == true } ?: active.lastOrNull()
+    }
+
+    /** Plays a recent album from the music card in place of the current music. */
+    private fun playRecent(recent: MediaData) {
+        val current = currentSession()
+        try {
+            if (current != null && current.packageName != recent.packageName && current.isPlaying == true) {
+                current.token?.let { MediaController(context, it).transportControls.pause() }
+            }
+            val token = recent.token
+            when {
+                token != null && !recent.resumption -> MediaController(context, token).transportControls.play()
+                recent.resumeAction != null -> recent.resumeAction?.run()
+                else -> {
+                    // Nothing to play from here: open the app instead.
+                    recent.clickIntent?.let { activityStarter.postStartActivityDismissingKeyguard(it) }
+                    return
+                }
+            }
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Could not play ${recent.packageName}", e)
+            return
+        }
+        // Swap at once; the app's own update confirms it a moment later.
+        chosenPackage = recent.packageName
+        if (recent.resumption) return // A resumed player arrives as a new session.
+        refreshMedia()
     }
 
     private fun refreshMedia() {
@@ -644,6 +700,8 @@ constructor(
                 cards.clear()
                 update()
             }
+
+            override fun onPlayRecent(recent: MediaData) = playRecent(recent)
 
             override fun onAction(key: String, action: IslandAction) {
                 try {

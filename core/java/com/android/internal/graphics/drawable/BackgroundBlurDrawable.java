@@ -75,6 +75,10 @@ public final class BackgroundBlurDrawable extends Drawable {
     private float mCornerRadiusBRX;
     private float mCornerRadiusBRY;
     private int mAlpha = 255;
+    // MiraCLO Liquid Glass: refraction > 0 makes SurfaceFlinger bend what is behind near the edge.
+    private float mRefraction;
+    private float mBevel;
+    private float mDispersion;
 
     // Do not update from UiThread. This holds the latest position for this drawable. It is used
     // by the Aggregator from RenderThread to get the final position of the blur region sent to SF
@@ -161,6 +165,20 @@ public final class BackgroundBlurDrawable extends Drawable {
     /**
      * Blur radius in pixels.
      */
+    /**
+     * MiraCLO Liquid Glass: bends what is behind this drawable near its edge. {@code refraction}
+     * 0 turns it off; {@code bevelPx} is the width of the bent edge in pixels and
+     * {@code dispersion} how far apart the colours split there.
+     */
+    public void setLiquidGlass(float refraction, float bevelPx, float dispersion) {
+        if (mRefraction != refraction || mBevel != bevelPx || mDispersion != dispersion) {
+            mRefraction = refraction;
+            mBevel = bevelPx;
+            mDispersion = dispersion;
+            mAggregator.onBlurDrawableUpdated(this);
+        }
+    }
+
     public void setBlurRadius(int blurRadius) {
         if (mBlurRadius != blurRadius) {
             mBlurRadius = blurRadius;
@@ -507,6 +525,9 @@ public final class BackgroundBlurDrawable extends Drawable {
         public final float cornerRadiusBRY;
         public final float alpha;
         public final Rect rect;
+        public final float refraction;
+        public final float bevel;
+        public final float dispersion;
 
         BlurRegion(BackgroundBlurDrawable drawable) {
             alpha = drawable.mAlpha / 255f;
@@ -520,13 +541,16 @@ public final class BackgroundBlurDrawable extends Drawable {
             cornerRadiusBRX = drawable.mCornerRadiusBRX;
             cornerRadiusBRY = drawable.mCornerRadiusBRY;
             rect = drawable.mRect;
+            refraction = drawable.mRefraction;
+            bevel = drawable.mBevel;
+            dispersion = drawable.mDispersion;
         }
 
         /**
          * Serializes this class into a float array that's more JNI friendly.
          */
         float[] toFloatArray() {
-            final float[] floatArray = new float[14];
+            final float[] floatArray = new float[17];
             floatArray[0] = blurRadius;
             floatArray[1] = alpha;
             floatArray[2] = rect.left;
@@ -541,6 +565,9 @@ public final class BackgroundBlurDrawable extends Drawable {
             floatArray[11] = cornerRadiusBLY;
             floatArray[12] = cornerRadiusBRX;
             floatArray[13] = cornerRadiusBRY;
+            floatArray[14] = refraction;
+            floatArray[15] = bevel;
+            floatArray[16] = dispersion;
             return floatArray;
         }
 

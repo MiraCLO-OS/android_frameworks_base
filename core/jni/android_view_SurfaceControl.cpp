@@ -922,10 +922,13 @@ static void nativeSetBlurRegions(JNIEnv* env, jclass clazz, jlong transactionObj
 
     std::vector<BlurRegion> blurRegionVector;
     const int size = regionsLength;
-    float region[14];
+    float region[17];
     for (int i = 0; i < size; i++) {
         jfloatArray regionArray = (jfloatArray)env->GetObjectArrayElement(regions, i);
-        env->GetFloatArrayRegion(regionArray, 0, 14, region);
+        // MiraCLO Liquid Glass adds refraction, bevel and dispersion after the 14 standard values.
+        const jsize length = env->GetArrayLength(regionArray);
+        region[14] = region[15] = region[16] = 0.0f;
+        env->GetFloatArrayRegion(regionArray, 0, length >= 17 ? 17 : 14, region);
         float blurRadius = region[0];
         float alpha = region[1];
         float left = region[2];
@@ -954,7 +957,10 @@ static void nativeSetBlurRegions(JNIEnv* env, jclass clazz, jlong transactionObj
                                               .left = static_cast<int>(left),
                                               .top = static_cast<int>(top),
                                               .right = static_cast<int>(right),
-                                              .bottom = static_cast<int>(bottom)});
+                                              .bottom = static_cast<int>(bottom),
+                                              .refraction = region[14],
+                                              .bevel = region[15],
+                                              .dispersion = region[16]});
     }
 
     transaction->setBlurRegions(ctrl, blurRegionVector);

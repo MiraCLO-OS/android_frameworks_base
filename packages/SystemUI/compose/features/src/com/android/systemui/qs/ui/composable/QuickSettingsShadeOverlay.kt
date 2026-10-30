@@ -16,6 +16,8 @@
 
 package com.android.systemui.qs.ui.composable
 
+import androidx.compose.foundation.isSystemInDarkTheme
+import com.android.systemui.qs.composefragment.MiraCLOOverlayQs
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -133,6 +135,7 @@ constructor(
     private val quickSettingsContainerViewModelFactory: QuickSettingsContainerViewModel.Factory,
     private val notificationStackScrollView: Lazy<NotificationScrollView>,
     private val notificationsPlaceholderViewModelFactory: NotificationsPlaceholderViewModel.Factory,
+    private val miracloQs: MiraCLOOverlayQs,
 ) : Overlay {
 
     override val key = Overlays.QuickSettingsShade
@@ -191,6 +194,16 @@ constructor(
         }
 
         LaunchedEffectWithLifecycle(key1 = Unit) { contentViewModel.detectShadeModeChanges() }
+        remember { miracloQs.watch() }
+        // MiraCLO: ColorOS Quick Settings brings its own glass, so the panel is clear with Liquid
+        // Glass and solid dark without it (as in the old shade).
+        val miracloPanelColor: Color? =
+            when {
+                !miracloQs.qsStyle -> null
+                miracloQs.liquidGlass -> Color.Transparent
+                isSystemInDarkTheme() -> Color(0xFF0B0C0F)
+                else -> null
+            }
 
         Box(
             modifier =
@@ -227,10 +240,12 @@ constructor(
                         )
                     }
                 },
+                panelColor = miracloPanelColor,
             ) {
                 QuickSettingsContainer(
                     contentViewModel = contentViewModel,
                     containerViewModel = quickSettingsContainerViewModel,
+                    miracloQs = miracloQs,
                 )
             }
             SnoozableHeadsUpNotificationPlaceholder(
@@ -263,6 +278,7 @@ private fun useBrightnessMirrorInOverlay(): Boolean {
 private fun ContentScope.QuickSettingsContainer(
     contentViewModel: QuickSettingsShadeOverlayContentViewModel,
     containerViewModel: QuickSettingsContainerViewModel,
+    miracloQs: MiraCLOOverlayQs,
     modifier: Modifier = Modifier,
 ) {
     val isEditing by containerViewModel.editModeViewModel.isEditing.collectAsStateWithLifecycle()
@@ -325,7 +341,40 @@ private fun ContentScope.QuickSettingsContainer(
                 )
             }
 
-            ShadeBodyState.Default -> {
+            ShadeBodyState.Default -> if (miracloQs.qsStyle) {
+                // MiraCLO: the ColorOS Quick Settings, with the toolbar (edit, settings, power)
+                // below it like the ColorOS footer.
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier =
+                        modifier
+                            .sysuiResTag("quick_settings_panel")
+                            .padding(horizontal = QuickSettingsShade.Dimensions.HorizontalPadding),
+                ) {
+                    VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
+                    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                        with(miracloQs) {
+                            Content(
+                                container = containerViewModel,
+                                settled = layoutState.isIdle(contentKey),
+                            )
+                        }
+                        VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
+                        val toolbarViewModel =
+                            rememberViewModel("MiraCLOQuickSettingsToolbar") {
+                                contentViewModel.toolbarViewModelFactory.create()
+                            }
+                        Toolbar(
+                            modifier =
+                                Modifier.fillMaxWidth()
+                                    .requiredHeight(QuickSettingsShade.Dimensions.ToolbarHeight),
+                            viewModel = toolbarViewModel,
+                            isFullyVisible = { layoutState.isIdle(contentKey) },
+                        )
+                        VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
+                    }
+                }
+            } else {
                 QuickSettingsLayout(
                     qsContainerViewModel = containerViewModel,
                     toolbarViewModelFactory = contentViewModel.toolbarViewModelFactory,

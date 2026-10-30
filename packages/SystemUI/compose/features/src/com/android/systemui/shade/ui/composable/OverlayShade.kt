@@ -75,6 +75,8 @@ fun ContentScope.OverlayShade(
         { _, _, _ ->
         },
     header: @Composable () -> Unit,
+    // MiraCLO: Quick Settings with its own glass draws its own panel colour.
+    panelColor: Color? = null,
     content: @Composable () -> Unit,
 ) {
     val isFullWidth = LocalSceneContainerPreloadedResources.current.isFullWidthShade
@@ -98,6 +100,7 @@ fun ContentScope.OverlayShade(
         ) {
             Panel(
                 enableTransparency = enableTransparency,
+                panelColor = panelColor,
                 spec = panelSpec,
                 modifier =
                     Modifier.overscroll(verticalOverscrollEffect)
@@ -165,6 +168,7 @@ fun ContentScope.OverlayShade(
 @Composable
 private fun ContentScope.Panel(
     enableTransparency: Boolean,
+    panelColor: Color?,
     spec: VerticalExpandContainerSpec,
     modifier: Modifier = Modifier,
     header: (@Composable () -> Unit)?,
@@ -174,7 +178,8 @@ private fun ContentScope.Panel(
         modifier =
             modifier
                 .disableSwipesWhenScrolling()
-                .verticalExpandContainerBackground(Colors.panelBackground(enableTransparency), spec)
+                .verticalExpandContainerBackground(
+                    panelColor ?: Colors.panelBackground(enableTransparency), spec)
     ) {
         Column {
             header?.invoke()

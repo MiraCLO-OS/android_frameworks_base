@@ -16,6 +16,9 @@
 
 package com.android.systemui.notifications.ui.composable
 
+import com.android.systemui.miraclo.MiraCLOLiquidGlass
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
@@ -131,7 +134,13 @@ constructor(
         val animatedBlurRadiusPx: Float by
             animateFloatAsState(targetValue = targetBlurRadiusPx, label = "NSOverlay-blurRadius")
 
+        // MiraCLO: with Liquid Glass notifications the cards are see-through glass, so the panel
+        // behind them is clear and the shade blur shows through, as in the old shade.
+        val miracloContext = LocalContext.current
+        val miracloGlassPanel =
+            MiraCLOLiquidGlass.isEnabled(miracloContext, MiraCLOLiquidGlass.NOTIFICATIONS)
         OverlayShade(
+            panelColor = if (miracloGlassPanel) Color.Transparent else null,
             panelElement = NotificationsShade.Elements.Panel,
             alignmentOnWideScreens = viewModel.alignmentOnWideScreens,
             statusBarHeightPx = viewModel.statusBarHeightPx,

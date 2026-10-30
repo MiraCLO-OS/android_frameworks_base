@@ -16,6 +16,8 @@
 
 package com.android.systemui.shade.ui.composable
 
+import com.android.systemui.miraclo.MiraCLOShadeChips
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.indication
@@ -127,6 +129,9 @@ fun ShadeHighlightChip(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
+    // MiraCLO: Settings > Display > Status bar chips can turn the chip backgrounds off.
+    val miracloContext = LocalContext.current
+    remember { MiraCLOShadeChips.watch(miracloContext) }
 
     // Note: Intentionally assigning here instead of using `by`, which would unwrap the value and
     // cause recomposition.
@@ -160,7 +165,7 @@ fun ShadeHighlightChip(
                     )
                     .drawBehind {
                         val bgColor = animatedBackgroundColor.value
-                        if (bgColor != Color.Unspecified) {
+                        if (bgColor != Color.Unspecified && MiraCLOShadeChips.enabled) {
                             drawRoundRect(color = bgColor)
                         }
                     }

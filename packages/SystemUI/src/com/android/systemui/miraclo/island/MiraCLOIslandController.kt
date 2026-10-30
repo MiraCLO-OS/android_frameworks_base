@@ -6,7 +6,9 @@
 package com.android.systemui.miraclo.island
 
 import android.app.ActivityManager
+import android.app.ActivityOptions
 import android.app.ActivityTaskManager
+import android.app.BroadcastOptions
 import android.app.PendingIntent
 import android.app.StatusBarManager
 import android.app.WindowConfiguration
@@ -736,7 +738,18 @@ constructor(
 
             override fun onAction(key: String, action: IslandAction) {
                 try {
-                    action.run?.invoke() ?: action.intent?.send()
+                    // Sent like a tap in the shade: the user tapped it, so the app may start an
+                    // activity (Answer opens the call screen; without this it is "BAL blocked").
+                    action.run?.invoke()
+                        ?: action.intent?.send(
+                            BroadcastOptions.makeBasic()
+                                .apply {
+                                    isInteractive = true
+                                    pendingIntentBackgroundActivityStartMode =
+                                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS
+                                }
+                                .toBundle()
+                        )
                 } catch (e: PendingIntent.CanceledException) {
                     Log.w(TAG, "Action no longer available", e)
                 }

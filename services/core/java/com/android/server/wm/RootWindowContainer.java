@@ -2541,7 +2541,7 @@ public class RootWindowContainer extends WindowContainer<DisplayContent>
                                r.packageName, -1, BoostFramework.Launch.BOOST_V3);
                    }
                }
-            }else {
+            } else {
                if (mPerfBoost.getPerfHalVersion() >= BoostFramework.PERF_HAL_V23) {
                   mPerfBoost.perfHintAcqRel(-1, BoostFramework.VENDOR_HINT_FIRST_LAUNCH_BOOST,
                     r.packageName, wpcPid, BoostFramework.Launch.BOOST_V1, 2, pkgType, wpcPid);
@@ -2606,6 +2606,17 @@ public class RootWindowContainer extends WindowContainer<DisplayContent>
 
                     QtiBackgroundManager.getInstance().freezeProcessLevel(
                             r.packageName, QtiBackgroundManager.WARM_LAUNCH_FREEZE);
+
+                    // FIX for LL Lite feature not activating for games.
+                    // Root cause: activity record is STOPPED (stale, process was killed) but code
+                    // treats it as warm launch and skips acquireAppLaunchPerfLock(). Without that,
+                    // hint 0x1081 (VENDOR_HINT_FIRST_LAUNCH_BOOST) types 1,2,3 are never sent to
+                    // perfservice, so LL Lite feature does not activate.
+                    // Fix: if process is not actually running (attachedToProcess() == false),
+                    // treat this as a cold launch and apply full launch boost.
+                    if (!mTmpFindTaskResult.mIdealRecord.attachedToProcess()) {
+                        acquireAppLaunchPerfLock(r);
+                    }
                 }
                 return mTmpFindTaskResult.mIdealRecord;
             } else if (mTmpFindTaskResult.mCandidateRecord != null) {
@@ -2617,11 +2628,25 @@ public class RootWindowContainer extends WindowContainer<DisplayContent>
         if ((mTmpFindTaskResult.mIdealRecord == null) ||
             (mTmpFindTaskResult.mIdealRecord.getState() == DESTROYED)) {
 // QTI_BEGIN: 2023-06-28: Core: Perf:Fix the issue that activity boost duration abnormal.
-            if (r != null && r.isMainIntent(r.intent)) {
-                acquireAppLaunchPerfLock(r);
+            if (r != null) {
+                // FIX2 - The original isMainIntent() check is too restrictive:
+                // games with non-standard intents (not ACTION_MAIN+CATEGORY_LAUNCHER), so isMainIntent()
+                // returns false and acquireAppLaunchPerfLock() is never called, meaning hint
+                // 0x1081 types 1,2,3 are never sent to perfservice and LL Lite does not activate.
+                // Fix: also apply cold launch boost when the process is not running, regardless
+                // of intent type. This preserves the original "no boost for in-app activity
+                // launches" behavior (process running + non-main intent = skip boost).
+                final WindowProcessController wpcCheck =
+                        (r.info != null && r.info.applicationInfo != null)
+                        ? mService.getProcessController(r.processName, r.info.applicationInfo.uid)
+                        : null;
+                final boolean isProcessRunning = (wpcCheck != null && wpcCheck.hasThread());
+                if (r.isMainIntent(r.intent) || !isProcessRunning) {
+                    acquireAppLaunchPerfLock(r);
 // QTI_END: 2023-06-28: Core: Perf:Fix the issue that activity boost duration abnormal.
                 QtiBackgroundManager.getInstance().freezeProcessLevel(
                         r.packageName, QtiBackgroundManager.FIRST_LAUNCH_FREEZE);
+                }
 // QTI_BEGIN: 2023-06-28: Core: Perf:Fix the issue that activity boost duration abnormal.
             } else if (r == null) {
                 Slog.w(TAG, "Should not happen! Didn't apply launch boost");

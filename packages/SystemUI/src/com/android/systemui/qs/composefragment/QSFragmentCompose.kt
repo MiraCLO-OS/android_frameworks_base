@@ -16,6 +16,13 @@
 
 package com.android.systemui.qs.composefragment
 
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.animation.core.animateFloatAsState
+import com.android.systemui.miraclo.MiraCLOSplitShade
+import com.android.systemui.miraclo.LocalMiraCLOGlassAlpha
+import com.android.systemui.miraclo.LocalMiraCLORefraction
+import com.android.systemui.miraclo.MiraCLORefraction
 import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.content.Context
@@ -231,6 +238,7 @@ constructor(
     private var useCircularQsTileShapes by mutableStateOf(false)
     private var miracloQsStyle by mutableStateOf(false)
     private var miracloLiquidGlass by mutableStateOf(false)
+    private var miracloRefraction by mutableStateOf(false)
 
     /** MiraCLO: media sessions for the ColorOS-style QS media card. */
     private val miracloMediaSessions = MiraCLOMediaSessions()
@@ -268,7 +276,8 @@ constructor(
                     Settings.System.QS_TILES_CIRCULAR,
                     MIRACLO_QS_STYLE,
                     MIRACLO_LIQUID_GLASS,
-                    MIRACLO_LIQUID_GLASS_QS -> readQsSettings()
+                    MIRACLO_LIQUID_GLASS_QS,
+                    MiraCLORefraction.KEY -> readQsSettings()
                 }
             }
         }
@@ -293,6 +302,9 @@ constructor(
         settingsResolver.registerContentObserver(
             Settings.Secure.getUriFor(MIRACLO_LIQUID_GLASS), false,
             settingsObserver, UserHandle.USER_ALL)
+        settingsResolver.registerContentObserver(
+            Settings.Secure.getUriFor(MiraCLORefraction.KEY), false, settingsObserver,
+            UserHandle.USER_ALL)
         settingsResolver.registerContentObserver(
             Settings.Secure.getUriFor(MIRACLO_LIQUID_GLASS_QS), false,
             settingsObserver, UserHandle.USER_ALL)
@@ -328,6 +340,8 @@ constructor(
             settingsResolver, MIRACLO_LIQUID_GLASS, 0, userTracker.userId) != 0 &&
             Settings.Secure.getIntForUser(
                 settingsResolver, MIRACLO_LIQUID_GLASS_QS, 1, userTracker.userId) != 0
+        miracloRefraction = miracloLiquidGlass && Settings.Secure.getIntForUser(
+            settingsResolver, MiraCLORefraction.KEY, 0, userTracker.userId) != 0
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -410,16 +424,39 @@ constructor(
                 LocalUseCircularQsTileShapes provides useCircularQsTileShapes,
                 LocalMiraCLOQsStyle provides miracloQsStyle,
                 LocalMiraCLOLiquidGlass provides miracloLiquidGlass,
+                LocalMiraCLORefraction provides miracloRefraction,
+                LocalMiraCLOGlassAlpha provides { viewModel.expansionState.progress },
             ) {
                 // MiraCLO: without Liquid Glass the dark ColorOS QS is solid, with no blur: an
                 // opaque shade fades in behind it as QS expands (QQS and notifications untouched).
                 val miracloSolid =
                     miracloQsStyle && !miracloLiquidGlass &&
                         MaterialTheme.colorScheme.surface.luminance() < 0.5f
+                // MiraCLO split shade: a pull from the notifications side hides Quick Settings;
+                // a pull from its own side fades it back in.
+                val miracloQsAlpha by
+                    animateFloatAsState(
+                        if (MiraCLOSplitShade.notificationsOnly) 0f else 1f,
+                        tween(durationMillis = 220),
+                        label = "MiraCLOSplitShadeQs",
+                    )
                 ProvideShortcutHelperIndication(interactionsConfig = interactionsConfig()) {
                     Box(
                         modifier =
                             modifier
+                                .graphicsLayer { alpha = miracloQsAlpha }
+                                .thenIf(MiraCLOSplitShade.notificationsOnly) {
+                                    // Hidden tiles must not take taps.
+                                    Modifier.pointerInput(Unit) {
+                                        awaitPointerEventScope {
+                                            while (true) {
+                                                awaitPointerEvent(PointerEventPass.Initial)
+                                                    .changes
+                                                    .forEach { it.consume() }
+                                            }
+                                        }
+                                    }
+                                }
                                 .thenIf(miracloSolid) {
                                     Modifier.drawBehind {
                                         val p = viewModel.expansionState.progress.coerceIn(0f, 1f)

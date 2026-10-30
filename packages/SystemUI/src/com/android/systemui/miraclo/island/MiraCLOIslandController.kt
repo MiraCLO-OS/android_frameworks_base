@@ -5,6 +5,7 @@
 
 package com.android.systemui.miraclo.island
 
+import com.android.systemui.miraclo.MiraCLORefraction
 import android.app.ActivityManager
 import android.app.ActivityOptions
 import android.app.ActivityTaskManager
@@ -342,10 +343,13 @@ constructor(
         systemSources.lowBatteryEnabled = on(KEY_LOW_BATTERY, 1)
         config =
             MiraCLOIslandView.Config(
-                touchGlow = on(KEY_TOUCH_GLOW, 1),
+                // MiraCLO Liquid Glass glow also lights the island under the finger.
+                touchGlow = on(KEY_TOUCH_GLOW, 1) ||
+                    (on(KEY_LIQUID_GLASS, 0) && on(MiraCLORefraction.KEY_GLOW, 0)),
                 glass = on(KEY_LIQUID_GLASS, 0) && on(KEY_LG_ISLAND, 1),
                 glassPills = on(KEY_LIQUID_GLASS, 0) && on(KEY_LG_ISLAND_PILLS, 1),
                 ambientGlow = on(KEY_AMBIENT_GLOW, 1),
+                refraction = on(KEY_LIQUID_GLASS, 0) && on(MiraCLORefraction.KEY, 0),
                 haptics = on(KEY_HAPTICS, 1),
             )
         view?.config = config
@@ -897,6 +901,8 @@ constructor(
                 KEY_LIQUID_GLASS,
                 KEY_LG_ISLAND,
                 KEY_LG_ISLAND_PILLS,
+                MiraCLORefraction.KEY,
+                MiraCLORefraction.KEY_GLOW,
             )
     }
 }

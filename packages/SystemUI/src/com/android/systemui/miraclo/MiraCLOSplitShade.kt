@@ -43,6 +43,10 @@ object MiraCLOSplitShade {
     @Volatile private var swapped = false
     private var appContext: Context? = null
 
+    /** Whether split shade is on, as Compose state so Quick Settings follows the setting. */
+    var enabledState by mutableStateOf(false)
+        private set
+
     /** True while the shade shows notifications only. Read by Quick Settings to hide itself. */
     var notificationsOnly by mutableStateOf(false)
         private set
@@ -63,6 +67,10 @@ object MiraCLOSplitShade {
 
     @JvmStatic
     fun isNotificationsOnly(): Boolean = notificationsOnly
+
+    /** Starts watching the settings (Quick Settings calls this once). */
+    @JvmStatic
+    fun watch(context: Context) = ensureWatching(context)
 
     /** Called when a pull starts from the top edge with the shade closed. */
     @JvmStatic
@@ -99,6 +107,7 @@ object MiraCLOSplitShade {
         val context = appContext ?: return
         enabled = read(context, KEY)
         swapped = read(context, KEY_SWAP)
+        enabledState = enabled
         if (!enabled) notificationsOnly = false
     }
 

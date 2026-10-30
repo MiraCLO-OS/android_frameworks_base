@@ -5,6 +5,8 @@
 
 package com.android.systemui.qs.composefragment
 
+import com.android.systemui.miraclo.LocalMiraCLOGlow
+import com.android.systemui.miraclo.miracloCornerGlow
 import com.android.systemui.miraclo.LocalMiraCLORefraction
 import com.android.systemui.miraclo.miracloRefraction
 import android.media.AudioManager
@@ -160,7 +162,9 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
                         .then(
                             if (showMedia) Modifier.clip(MiraCLOMediaShape)
                             else Modifier.glassSurface(glass, MiraCLOMediaShape)
-                        ),
+                        )
+                        // MiraCLO Liquid Glass glow: a faint light in the card's bottom corner.
+                        .miracloCornerGlow(glass.liquid && LocalMiraCLOGlow.current),
                 contentAlignment = Alignment.Center,
             ) {
                 mediaHost(Modifier.matchParentSize())

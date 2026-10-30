@@ -176,6 +176,7 @@ public class QuickSettingsControllerImpl implements QuickSettingsController, Dum
     private final AccessibilityManager mAccessibilityManager;
     private final MetricsLogger mMetricsLogger;
     private final Resources mResources;
+    private boolean mMiracloPanelExpanded;
 
     /** Whether the notifications are displayed full width (no margins on the side). */
     private boolean mIsFullWidth;
@@ -629,9 +630,11 @@ public class QuickSettingsControllerImpl implements QuickSettingsController, Dum
 
     @Override
     public void setPanelExpanded(boolean panelExpanded) {
-        if (!panelExpanded) {
+        // MiraCLO split shade: forget "notifications only" once the shade has closed again.
+        if (mMiracloPanelExpanded && !panelExpanded) {
             MiraCLOSplitShade.showQuickSettings();
         }
+        mMiracloPanelExpanded = panelExpanded;
         if (mQs != null) {
             mQs.setPanelExpanded(panelExpanded);
         }

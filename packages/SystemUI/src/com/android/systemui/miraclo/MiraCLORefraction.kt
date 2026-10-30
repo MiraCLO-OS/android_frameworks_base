@@ -16,6 +16,21 @@
 
 package com.android.systemui.miraclo
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
@@ -42,6 +57,9 @@ object MiraCLORefraction {
     /** Settings.Secure key, 0 = off (default), 1 = on. Only used while Liquid Glass is on. */
     const val KEY = "miraclo_lg_refraction"
 
+    /** Settings.Secure key for the touch glow (and the music card's corner glow), 0 = off. */
+    const val KEY_GLOW = "miraclo_lg_glow"
+
     /** Values chosen on the mock: blur behind the glass, bent edge width, bend and colour split. */
     val BLUR = 10.dp
     val BEVEL = 16.dp
@@ -51,6 +69,9 @@ object MiraCLORefraction {
 
 /** Whether QS glass surfaces use refraction. Provided by QSFragmentCompose. */
 val LocalMiraCLORefraction = compositionLocalOf { false }
+
+/** Whether the Liquid Glass glow is on. Provided by QSFragmentCompose. */
+val LocalMiraCLOGlow = compositionLocalOf { false }
 
 /**
  * How visible the QS glass is right now (0..1), read while drawing. SurfaceFlinger does not see
@@ -77,7 +98,15 @@ fun Modifier.miracloRefraction(shape: Shape, enabled: Boolean): Modifier {
         }
     DisposableEffect(drawable) { onDispose { drawable?.setVisible(false, false) } }
     if (drawable == null) return this
-    return this.drawBehind {
+    // SurfaceFlinger does not clip the glass to the pager: fade it out as the surface leaves the
+    // visible area (next or previous Quick Settings page, screen edges).
+    val visible = remember { mutableFloatStateOf(1f) }
+    return this.onGloballyPositioned { c ->
+        val full = c.size.width.toFloat() * c.size.height.toFloat()
+        val b = c.boundsInWindow()
+        val f = if (full > 0f) (b.width * b.height) / full else 0f
+        visible.floatValue = ((f - 0.7f) / 0.3f).coerceIn(0f, 1f)
+    }.drawBehind {
         val w = size.width.toInt()
         val h = size.height.toInt()
         if (w <= 0 || h <= 0) return@drawBehind
@@ -87,7 +116,7 @@ fun Modifier.miracloRefraction(shape: Shape, enabled: Boolean): Modifier {
                 is Outline.Generic -> minOf(size.width, size.height) / 2f
                 else -> 0f
             }
-        val a = (alpha().coerceIn(0f, 1f) * 255f).toInt()
+        val a = (alpha().coerceIn(0f, 1f) * visible.floatValue * 255f).toInt()
         drawable.setVisible(a > 0, false)
         drawable.setBlurRadius(MiraCLORefraction.BLUR.toPx().toInt())
         drawable.setCornerRadius(radius)
@@ -102,3 +131,67 @@ fun Modifier.miracloRefraction(shape: Shape, enabled: Boolean): Modifier {
         }
     }
 }
+
+/**
+ * A soft light that follows the finger anywhere on this element while it is touched, like the
+ * Dynamic Island cards. Touches are only watched, never consumed.
+ */
+@Composable
+fun Modifier.miracloTouchGlow(enabled: Boolean): Modifier {
+    if (!enabled) return this
+    var pos by remember { mutableStateOf(Offset.Unspecified) }
+    var pressed by remember { mutableStateOf(false) }
+    val a by
+        animateFloatAsState(
+            if (pressed) 1f else 0f,
+            tween(durationMillis = if (pressed) 160 else 420),
+            label = "MiraCLOTouchGlow",
+        )
+    return this.pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val e = awaitPointerEvent(PointerEventPass.Initial)
+                    val ch = e.changes.firstOrNull() ?: continue
+                    pos = ch.position
+                    pressed = e.changes.any { it.pressed }
+                }
+            }
+        }
+        .drawWithContent {
+            drawContent()
+            if (a > 0.01f && pos.isSpecified) {
+                val r = 110.dp.toPx()
+                drawCircle(
+                    Brush.radialGradient(
+                        0f to Color.White.copy(alpha = 0.12f * a),
+                        0.45f to Color(0xFF9FB3FF).copy(alpha = 0.06f * a),
+                        1f to Color.Transparent,
+                        center = pos,
+                        radius = r,
+                    ),
+                    radius = r,
+                    center = pos,
+                )
+            }
+        }
+}
+
+/** A faint, constant light in the bottom corner of the music card. */
+fun Modifier.miracloCornerGlow(enabled: Boolean): Modifier =
+    if (!enabled) this
+    else
+        this.drawWithContent {
+            drawContent()
+            val c = Offset(size.width * 0.88f, size.height)
+            val r = size.minDimension * 0.9f
+            drawRect(
+                Brush.radialGradient(
+                    0f to Color(0xFFBFD0FF).copy(alpha = 0.16f),
+                    0.5f to Color.White.copy(alpha = 0.05f),
+                    1f to Color.Transparent,
+                    center = c,
+                    radius = r,
+                )
+            )
+        }
+

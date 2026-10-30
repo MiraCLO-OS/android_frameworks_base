@@ -16,6 +16,8 @@
 
 package com.android.systemui.qs.composefragment
 
+import com.android.systemui.miraclo.LocalMiraCLOGlow
+import com.android.systemui.miraclo.miracloTouchGlow
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.animation.core.animateFloatAsState
@@ -239,6 +241,7 @@ constructor(
     private var miracloQsStyle by mutableStateOf(false)
     private var miracloLiquidGlass by mutableStateOf(false)
     private var miracloRefraction by mutableStateOf(false)
+    private var miracloGlow by mutableStateOf(false)
 
     /** MiraCLO: media sessions for the ColorOS-style QS media card. */
     private val miracloMediaSessions = MiraCLOMediaSessions()
@@ -277,7 +280,8 @@ constructor(
                     MIRACLO_QS_STYLE,
                     MIRACLO_LIQUID_GLASS,
                     MIRACLO_LIQUID_GLASS_QS,
-                    MiraCLORefraction.KEY -> readQsSettings()
+                    MiraCLORefraction.KEY,
+                    MiraCLORefraction.KEY_GLOW -> readQsSettings()
                 }
             }
         }
@@ -304,6 +308,9 @@ constructor(
             settingsObserver, UserHandle.USER_ALL)
         settingsResolver.registerContentObserver(
             Settings.Secure.getUriFor(MiraCLORefraction.KEY), false, settingsObserver,
+            UserHandle.USER_ALL)
+        settingsResolver.registerContentObserver(
+            Settings.Secure.getUriFor(MiraCLORefraction.KEY_GLOW), false, settingsObserver,
             UserHandle.USER_ALL)
         settingsResolver.registerContentObserver(
             Settings.Secure.getUriFor(MIRACLO_LIQUID_GLASS_QS), false,
@@ -342,6 +349,9 @@ constructor(
                 settingsResolver, MIRACLO_LIQUID_GLASS_QS, 1, userTracker.userId) != 0
         miracloRefraction = miracloLiquidGlass && Settings.Secure.getIntForUser(
             settingsResolver, MiraCLORefraction.KEY, 0, userTracker.userId) != 0
+        miracloGlow = miracloLiquidGlass && Settings.Secure.getIntForUser(
+            settingsResolver, MiraCLORefraction.KEY_GLOW, 0, userTracker.userId) != 0
+        MiraCLOSplitShade.watch(requireContext())
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -419,13 +429,22 @@ constructor(
 
     @Composable
     private fun Content(modifier: Modifier = Modifier) {
-        PlatformTheme(isDarkTheme = if (notificationShadeBlur()) isSystemInDarkTheme() else true) {
+        // MiraCLO: with refraction, Quick Settings always uses the dark glass.
+        PlatformTheme(
+            isDarkTheme =
+                if (miracloRefraction) true
+                else if (notificationShadeBlur()) isSystemInDarkTheme()
+                else true
+        ) {
             CompositionLocalProvider(
                 LocalUseCircularQsTileShapes provides useCircularQsTileShapes,
                 LocalMiraCLOQsStyle provides miracloQsStyle,
                 LocalMiraCLOLiquidGlass provides miracloLiquidGlass,
                 LocalMiraCLORefraction provides miracloRefraction,
-                LocalMiraCLOGlassAlpha provides { viewModel.expansionState.progress },
+                LocalMiraCLOGlassAlpha provides {
+                    miracloSplitFade(viewModel.expansionState.progress)
+                },
+                LocalMiraCLOGlow provides miracloGlow,
             ) {
                 // MiraCLO: without Liquid Glass the dark ColorOS QS is solid, with no blur: an
                 // opaque shade fades in behind it as QS expands (QQS and notifications untouched).
@@ -440,11 +459,17 @@ constructor(
                         tween(durationMillis = 220),
                         label = "MiraCLOSplitShadeQs",
                     )
+                val miracloGlowModifier = Modifier.miracloTouchGlow(miracloGlow)
                 ProvideShortcutHelperIndication(interactionsConfig = interactionsConfig()) {
                     Box(
                         modifier =
                             modifier
-                                .graphicsLayer { alpha = miracloQsAlpha }
+                                .graphicsLayer {
+                                    alpha =
+                                        miracloQsAlpha *
+                                            miracloSplitFade(viewModel.expansionState.progress)
+                                }
+                                .then(miracloGlowModifier)
                                 .thenIf(MiraCLOSplitShade.notificationsOnly) {
                                     // Hidden tiles must not take taps.
                                     Modifier.pointerInput(Unit) {
@@ -1815,6 +1840,16 @@ private fun AlwaysDarkMode(content: @Composable () -> Unit) {
         }
     }
 }
+
+/**
+ * MiraCLO split shade: Quick Settings opens on its own, so the collapsed row of tiles is never
+ * shown. Quick Settings fades in as it expands and out as it closes, instead of morphing from
+ * and into that row.
+ */
+private fun miracloSplitFade(progress: Float): Float =
+    if (!MiraCLOSplitShade.enabledState) 1f
+    else if (MiraCLOSplitShade.notificationsOnly) 0f
+    else ((progress - 0.15f) / 0.6f).coerceIn(0f, 1f)
 
 /** MiraCLO: the solid dark shade behind the ColorOS QS when Liquid Glass is off. */
 private val MiraCLOSolidShade = Color(0xFF0B0C0F)

@@ -5,6 +5,7 @@
 
 package com.android.systemui.miraclo.island
 
+import com.android.systemui.miraclo.MiraCLORefraction
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
@@ -118,6 +119,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         val glass: Boolean = false,
         /** Liquid Glass pills and bubbles instead of the black pill. */
         val glassPills: Boolean = false,
+        /** Liquid Glass refraction: SurfaceFlinger bends what is behind the glass and lights its rim. */
+        val refraction: Boolean = false,
     )
 
     /**
@@ -783,7 +786,14 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         private fun applyGlassStyle() {
             val glass = liquidFor(geo.c)
             liquidNow = glass
-            blur?.setBlurRadius(dp(if (glass) 14 else 36))
+            // Refraction is always the dark glass; the shader draws the rim.
+            if (glass && config.refraction) {
+                blur?.setLiquidGlass(
+                    MiraCLORefraction.STRENGTH, dp(16).toFloat(), MiraCLORefraction.DISPERSION)
+            } else {
+                blur?.setLiquidGlass(0f, 0f, 0f)
+            }
+            blur?.setBlurRadius(dp(if (glass && config.refraction) 10 else if (glass) 14 else 36))
             blur?.setColor(if (glass) 0x4D10131C else 0x8C141519.toInt())
             if (width > 0) updateRimShaders(width, height)
             invalidate()
@@ -1055,8 +1065,10 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                     fill.alpha = (0xE6 * surface).toInt()
                     canvas.drawRoundRect(clip, g.r, g.r, fill)
                 }
-                gloss.alpha = (255 * surface).toInt().coerceIn(0, 255)
-                canvas.drawRoundRect(clip, g.r, g.r, gloss)
+                if (!(liquidNow && config.refraction && b != null)) {
+                    gloss.alpha = (255 * surface).toInt().coerceIn(0, 255)
+                    canvas.drawRoundRect(clip, g.r, g.r, gloss)
+                }
             }
         }
 
@@ -1100,7 +1112,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 val i = pillRim.strokeWidth / 2f
                 canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, pillRim)
             }
-            if (g.c > 0f || config.glassPills) {
+            if ((g.c > 0f || config.glassPills) && !(liquidNow && config.refraction && blur != null)) {
                 cardRim.alpha = if (config.glassPills) 255 else (255 * g.c).toInt().coerceIn(0, 255)
                 val i = cardRim.strokeWidth / 2f
                 canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, cardRim)

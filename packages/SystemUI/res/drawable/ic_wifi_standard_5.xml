@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     Copyright (C) 2022 Project Kaleidoscope
+               (C) 2022-2026 Paranoid Android
+
+     SPDX-License-Identifier: Apache-2.0
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="17.0dp"
+    android:height="12.58dp"
+    android:viewportWidth="16.21"
+    android:viewportHeight="12.0">
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M 16.200,10.221 L 16.200,10.221 Q 16.200,11.036 15.694,11.518 Q 15.186,12.000 14.301,12.000 L 14.301,12.000 Q 13.530,12.000 13.065,11.652 Q 12.603,11.305 12.493,10.647 L 12.493,10.647 L 13.515,10.563 Q 13.595,10.890 13.799,11.039 Q 14.003,11.188 14.312,11.188 L 14.312,11.188 Q 14.693,11.188 14.921,10.945 Q 15.149,10.700 15.149,10.242 L 15.149,10.242 Q 15.149,9.838 14.933,9.596 Q 14.719,9.354 14.334,9.354 L 14.334,9.354 Q 13.909,9.354 13.640,9.686 L 13.640,9.686 L 12.641,9.686 L 12.820,6.800 L 15.902,6.800 L 15.902,7.560 L 13.747,7.560 L 13.664,8.856 Q 14.035,8.529 14.591,8.529 L 14.591,8.529 Q 15.323,8.529 15.762,8.983 Q 16.200,9.438 16.200,10.221 Z" />
+</vector>

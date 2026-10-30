@@ -1,0 +1,1852 @@
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+/*
+ * Copyright (c) 2017-2018, The Linux Foundation. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following
+ *      disclaimer in the documentation and/or other materials provided
+ *      with the distribution.
+ *    * Neither the name of The Linux Foundation nor the names of its
+ *      contributors may be used to endorse or promote products derived
+ *      from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS
+ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+ * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN
+ * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+package android.util;
+
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+import android.app.ActivityThread;
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+import android.content.Context;
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.database.ContentObserver;
+import android.graphics.BLASTBufferQueue;
+import android.hardware.display.DisplayManager;
+import android.net.Uri;
+import android.os.Binder;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Process;
+import android.os.SystemProperties;
+import android.provider.Settings;
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+import android.util.Log;
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+
+import dalvik.system.PathClassLoader;
+
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
+
+import android.view.Display;
+
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+
+/** @hide */
+public class BoostFramework {
+
+    private static final String TAG = "BoostFramework";
+    private static final String PERFORMANCE_JAR = "/system/framework/QPerformance.jar";
+    private static final String PERFORMANCE_CLASS = "com.qualcomm.qti.Performance";
+
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    private static final String UXPERFORMANCE_JAR = "/system/framework/UxPerformance.jar";
+    private static final String UXPERFORMANCE_CLASS = "com.qualcomm.qti.UxPerformance";
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    public  static final float PERF_HAL_V22 = 2.2f;
+    public  static final float PERF_HAL_V23 = 2.3f;
+    public static final int VENDOR_T_API_LEVEL = 33;
+// QTI_BEGIN: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+    public static final int VENDOR_V_API_LEVEL = 202404;
+// QTI_END: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+    public final int board_first_api_lvl = SystemProperties.getInt("ro.board.first_api_level", 0);
+    public final int board_api_lvl = SystemProperties.getInt("ro.board.api_level", 0);
+    //key in privider settings global
+    public static final String KEY_LEGACY_UI_PERF_PKGS = "LEGACY_UI_PERF_PROCS";
+    public static final String KEY_GPU_PREFER = "UI_PERF_GPU_PREFER";
+    public static final String KEY_CPU_PREFER = "UI_PERF_CPU_PREFER";
+    public static final String KEY_CPU_AGGRESSIVE = "UI_PERF_CPU_AGGRESSIVE";
+    public static final String KEY_CPU_GPU = "UI_PERF_CPU_GPU";
+    public static final String KEY_PKGS = "UI_PERF_PKGS";
+    public static final String KEY_IGNORE_PKGS = "UI_PERF_IGNORE_PKGS";
+    public static final String KEY_LOW_FPS_PREFER = "UI_PERF_LOW_FPS_PREFER";
+    public static final String KEY_FPS_BY_DEFAULT = "UI_PERF_FPS_BY_DEFAULT";
+    public static final String KEY_FULL_SEQUENCE = "UI_FULL_SEQUENCE";
+    //ui perf mode controller in android space
+    public static final String UI_PERF_PROP = "debug.ui.perfmode.enable";
+    public static final String UI_LEGACY_PERF_PROP = "sys.ui.legacy_perfmode.enable";
+    //Deprecated, will be removed soon.
+    public static final String UI_PERF_PROC_PROP = "debug.ui.perfmode.process";
+
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+/** @hide */
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    private static boolean sIsLoaded = false;
+    private static Class<?> sPerfClass = null;
+    private static Method sAcquireFunc = null;
+    private static Method sPerfHintFunc = null;
+    private static Method sReleaseFunc = null;
+// QTI_BEGIN: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+    private static Method sPerfHintRelFunc = null;
+// QTI_END: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+    private static Method sReleaseHandlerFunc = null;
+    private static Method sFeedbackFunc = null;
+    private static Method sFeedbackFuncExtn = null;
+    private static Method sPerfGetPropFunc = null;
+    private static Method sAcqAndReleaseFunc = null;
+    private static Method sperfHintAcqRelFunc = null;
+    private static Method sperfHintRenewFunc = null;
+    private static Method sPerfEventFunc = null;
+    private static Method sPerfGetPerfHalVerFunc = null;
+    private static Method sPerfSyncRequest = null;
+
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    private static Method sIOPStart = null;
+    private static Method sIOPStop  = null;
+    private static Method sUXEngineEvents  = null;
+    private static Method sUXEngineTrigger  = null;
+
+    private static boolean sUxIsLoaded = false;
+    private static Class<?> sUxPerfClass = null;
+    private static Method sUxIOPStart = null;
+
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+/** @hide */
+    private Object mPerf = null;
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    private Object mUxPerf = null;
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+
+    //perf hints
+    public static final int VENDOR_HINT_SCROLL_BOOST = 0x00001080;
+    public static final int VENDOR_HINT_FIRST_LAUNCH_BOOST = 0x00001081;
+    public static final int VENDOR_HINT_SUBSEQ_LAUNCH_BOOST = 0x00001082;
+    public static final int VENDOR_HINT_ANIM_BOOST = 0x00001083;
+    public static final int VENDOR_HINT_ACTIVITY_BOOST = 0x00001084;
+    public static final int VENDOR_HINT_TOUCH_BOOST = 0x00001085;
+    public static final int VENDOR_HINT_MTP_BOOST = 0x00001086;
+    public static final int VENDOR_HINT_DRAG_BOOST = 0x00001087;
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+// QTI_BEGIN: 2018-03-27: Core: framework/base: add parallel verifyV1
+    public static final int VENDOR_HINT_PACKAGE_INSTALL_BOOST = 0x00001088;
+// QTI_END: 2018-03-27: Core: framework/base: add parallel verifyV1
+    public static final int VENDOR_HINT_ROTATION_LATENCY_BOOST = 0x00001089;
+    public static final int VENDOR_HINT_ROTATION_ANIM_BOOST = 0x00001090;
+    public static final int VENDOR_HINT_PERFORMANCE_MODE = 0x00001091;
+    public static final int VENDOR_HINT_APP_UPDATE = 0x00001092;
+    public static final int VENDOR_HINT_KILL = 0x00001093;
+    public static final int VENDOR_HINT_BOOST_RENDERTHREAD = 0x00001096;
+    public static final int VENDOR_HINT_PASS_PID = 0x0000109C;
+    public static final int VENDOR_HINT_SCENARIO_GPU = 0x000010AA;
+    public static final int VENDOR_HINT_SCENARIO_CPU = 0x000010AB;
+    public static final int VENDOR_HINT_SCENARIO_CPU_GPU = 0x000010AC;
+    public static final int VENDOR_HINT_SCENARIO_CPU_AGGRESSIVE = 0x000010AD;
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    //perf events
+    public static final int VENDOR_HINT_FIRST_DRAW = 0x00001042;
+    public static final int VENDOR_HINT_TAP_EVENT = 0x00001043;
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    public static final int VENDOR_HINT_DRAG_START = 0x00001051;
+    public static final int VENDOR_HINT_DRAG_END = 0x00001052;
+    public static final int VENDOR_HINT_PIN_FILE = 0x0000105E;
+    public static final int VENDOR_HINT_UNPIN_FILE = 0x0000105F;
+    public static final int VENDOR_HINT_BATTERY_CHARGING = 0x000010B3;
+
+    //Ime Launch Boost Hint
+    public static final int VENDOR_HINT_IME_LAUNCH_EVENT = 0x0000109F;
+    //App exit animation boost
+    public static final int VENDOR_HINT_EXIT_ANIM_BOOST = 0x000010A9;
+
+    //feedback hints
+    public static final int VENDOR_FEEDBACK_WORKLOAD_TYPE = 0x00001601;
+    public static final int VENDOR_FEEDBACK_LAUNCH_END_POINT = 0x00001602;
+    public static final int VENDOR_FEEDBACK_PA_FW = 0x00001604;
+
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    //UXE Events and Triggers
+    public static final int UXE_TRIGGER = 1;
+    public static final int UXE_EVENT_BINDAPP = 2;
+    public static final int UXE_EVENT_DISPLAYED_ACT = 3;
+    public static final int UXE_EVENT_KILL = 4;
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    public static final int UXE_EVENT_GAME  = 5;
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    public static final int UXE_EVENT_SUB_LAUNCH = 6;
+    public static final int UXE_EVENT_PKG_UNINSTALL = 7;
+    public static final int UXE_EVENT_PKG_INSTALL = 8;
+
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+    //New Hints while porting IOP to Perf Hal.
+    public static final int VENDOR_HINT_BINDAPP = 0x000010A0;
+    public static final int VENDOR_HINT_WARM_LAUNCH = 0x000010A1; //SUB_LAUNCH
+    // 0x000010A2 is added in UXPerformance.java for SPEED Hints
+    public static final int VENDOR_HINT_PKG_INSTALL = 0x000010A3;
+    public static final int VENDOR_HINT_PKG_UNINSTALL = 0x000010A4;
+
+    public static final int VENDOR_HINT_BM_CPU_CORECTL_L = 0x000010B1;
+    public static final int VENDOR_HINT_BM_THP_UPDATE = 0x000010B2;
+    //perf opcodes
+    public static final int MPCTLV3_GPU_IS_APP_FG = 0X42820000;
+    public static final int MPCTLV3_GPU_IS_APP_BG = 0X42824000;
+    public static final int MPCTLV3_THP_DEFRAG = 0x42C88000;
+    public static final int MPCTLV3_VM_COMPACTION_PROACTIVENESS = 0x42C8C000;
+
+    public static final int VENDOR_EVENT_ACTIVITY_WINDOW_MODE_UPDATE = 0x00001066;
+    public static final int VENDOR_EVENT_KILL_ABNORMAL = 0x00001068;
+    public static final int VENDOR_EVENT_DEVICE_WINDOW_MODE_UPDATE = 0x00001069;
+
+    public class ActivityWindowMode {
+        public static int STANDARD = 0;
+        public static int MULTI_WINDOW = 1;
+        public static int PIP = 2;
+    };
+
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    public class Scroll {
+        public static final int VERTICAL = 1;
+        public static final int HORIZONTAL = 2;
+        public static final int PANEL_VIEW = 3;
+        public static final int PREFILING = 4;
+    };
+
+    public class Launch {
+        public static final int BOOST_V1 = 1;
+        public static final int BOOST_V2 = 2;
+        public static final int BOOST_V3 = 3;
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        public static final int BOOST_GAME = 4;
+        public static final int RESERVED_1 = 5;
+        public static final int RESERVED_2 = 6;
+        public static final int RESERVED_3 = 7;
+        public static final int RESERVED_4 = 8;
+        public static final int RESERVED_5 = 9;
+        public static final int ACTIVITY_LAUNCH_BOOST = 10;
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        public static final int TYPE_SERVICE_START = 100;
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        public static final int TYPE_START_PROC = 101;
+        public static final int TYPE_START_APP_FROM_BG = 102;
+        public static final int TYPE_ATTACH_APPLICATION = 103;
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    };
+
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    public class PassPid {
+        public static final int APP_PID = 4;
+        public static final int RENDER_TID = 5;
+    }
+
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    public class Draw {
+        public static final int EVENT_TYPE_V1 = 1;
+    };
+
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+    public class WorkloadType {
+        public static final int NOT_KNOWN = 0;
+        public static final int APP = 1;
+        public static final int GAME = 2;
+        public static final int BROWSER = 3;
+        public static final int PREPROAPP = 4;
+        public static final int VIDEO = 5;
+        public static final int APP_OF_INTEREST = 6;
+    };
+
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+/** @hide */
+    public BoostFramework() {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        initFunctions();
+
+        try {
+            if (sPerfClass != null) {
+                mPerf = sPerfClass.newInstance();
+            }
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+            if (sUxPerfClass != null) {
+                mUxPerf = sUxPerfClass.newInstance();
+            }
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+        }
+        catch(Exception e) {
+            Log.e(TAG,"BoostFramework() : Exception_2 = " + e);
+        }
+    }
+
+/** @hide */
+    public BoostFramework(Context context) {
+        this(context, false);
+    }
+
+/** @hide */
+    public BoostFramework(Context context, boolean isTrusted) {
+        initFunctions();
+
+        try {
+            if (sPerfClass != null) {
+                Constructor cons = sPerfClass.getConstructor(Context.class);
+                if (cons != null)
+                    mPerf = cons.newInstance(context);
+            }
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+            if (sUxPerfClass != null) {
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                if (isTrusted) {
+                    Constructor cons = sUxPerfClass.getConstructor(Context.class);
+                    if (cons != null)
+                        mUxPerf = cons.newInstance(context);
+                } else {
+                    mUxPerf = sUxPerfClass.newInstance();
+                }
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+            }
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+        }
+        catch(Exception e) {
+            Log.e(TAG,"BoostFramework() : Exception_3 = " + e);
+        }
+    }
+
+/** @hide */
+    public BoostFramework(boolean isUntrustedDomain) {
+        initFunctions();
+
+        try {
+            if (sPerfClass != null) {
+                Constructor cons = sPerfClass.getConstructor(boolean.class);
+                if (cons != null)
+                    mPerf = cons.newInstance(isUntrustedDomain);
+            }
+            if (sUxPerfClass != null) {
+                mUxPerf = sUxPerfClass.newInstance();
+            }
+        }
+        catch(Exception e) {
+            Log.e(TAG,"BoostFramework() : Exception_5 = " + e);
+        }
+    }
+
+    private void initFunctions () {
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        synchronized(BoostFramework.class) {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            if (sIsLoaded == false) {
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                try {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                    sPerfClass = Class.forName(PERFORMANCE_CLASS);
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+
+                    Class[] argClasses = new Class[] {int.class, int[].class};
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                    sAcquireFunc = sPerfClass.getMethod("perfLockAcquire", argClasses);
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+
+                    argClasses = new Class[] {int.class, String.class, int.class, int.class};
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                    sPerfHintFunc = sPerfClass.getMethod("perfHint", argClasses);
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+
+                    argClasses = new Class[] {};
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                    sReleaseFunc = sPerfClass.getMethod("perfLockRelease", argClasses);
+
+// QTI_BEGIN: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+                    argClasses = new Class[] {};
+                    sPerfHintRelFunc = sPerfClass.getMethod("perfHintRelease", argClasses);
+
+// QTI_END: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                    argClasses = new Class[] {int.class};
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                    sReleaseHandlerFunc = sPerfClass.getDeclaredMethod("perfLockReleaseHandler", argClasses);
+
+                    argClasses = new Class[] {int.class, String.class};
+                    sFeedbackFunc = sPerfClass.getMethod("perfGetFeedback", argClasses);
+
+                    argClasses = new Class[] {int.class, String.class, int.class, int[].class};
+                    sFeedbackFuncExtn = sPerfClass.getMethod("perfGetFeedbackExtn", argClasses);
+
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                    argClasses = new Class[] {int.class, String.class, String.class};
+                    sIOPStart =   sPerfClass.getDeclaredMethod("perfIOPrefetchStart", argClasses);
+
+                    argClasses = new Class[] {};
+                    sIOPStop =  sPerfClass.getDeclaredMethod("perfIOPrefetchStop", argClasses);
+
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                    argClasses = new Class[] {String.class, String.class};
+                    sPerfGetPropFunc = sPerfClass.getMethod("perfGetProp", argClasses);
+
+                    argClasses = new Class[] {int.class, int.class, int.class, int.class, int[].class};
+                    sAcqAndReleaseFunc = sPerfClass.getMethod("perfLockAcqAndRelease", argClasses);
+
+                    argClasses = new Class[] {int.class, String.class, int.class, int[].class};
+                    sPerfEventFunc = sPerfClass.getMethod("perfEvent", argClasses);
+
+                    argClasses = new Class[] {int.class};
+                    sPerfSyncRequest = sPerfClass.getMethod("perfSyncRequest", argClasses);
+
+                    argClasses = new Class[] {int.class, int.class, String.class, int.class,
+                                              int.class, int.class, int[].class};
+                    sperfHintAcqRelFunc = sPerfClass.getMethod("perfHintAcqRel", argClasses);
+
+                    argClasses = new Class[] {int.class, int.class, String.class, int.class,
+                                              int.class, int.class, int[].class};
+                    sperfHintRenewFunc = sPerfClass.getMethod("perfHintRenew", argClasses);
+
+                    try {
+                        argClasses = new Class[] {};
+                        sPerfGetPerfHalVerFunc = sPerfClass.getMethod("perfGetHalVer", argClasses);
+
+                    } catch (Exception e) {
+                        Log.i(TAG, "BoostFramework() : Exception_1 = perfGetHalVer not supported");
+                        sPerfGetPerfHalVerFunc = null;
+                    }
+
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                    try {
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2019-05-30: Core: Perf: Change for AGPE
+                        argClasses = new Class[] {int.class, int.class, String.class, int.class, String.class};
+// QTI_END: 2019-05-30: Core: Perf: Change for AGPE
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                        sUXEngineEvents =  sPerfClass.getDeclaredMethod("perfUXEngine_events",
+                                                                          argClasses);
+
+                        argClasses = new Class[] {int.class};
+                        sUXEngineTrigger =  sPerfClass.getDeclaredMethod("perfUXEngine_trigger",
+                                                                           argClasses);
+                    } catch (Exception e) {
+                        Log.i(TAG, "BoostFramework() : Exception_4 = PreferredApps not supported");
+                    }
+
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                    sIsLoaded = true;
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+                }
+                catch(Exception e) {
+                    Log.e(TAG,"BoostFramework() : Exception_1 = " + e);
+                }
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                // Load UXE Class now Adding new try/catch block to avoid
+                // any interference with Qperformance
+                try {
+                    sUxPerfClass = Class.forName(UXPERFORMANCE_CLASS);
+
+                    Class[] argUxClasses = new Class[] {int.class, String.class, String.class};
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2019-05-30: Core: Perf: Change for AGPE
+                    sUxIOPStart = sUxPerfClass.getDeclaredMethod("perfIOPrefetchStart", argUxClasses);
+// QTI_END: 2019-05-30: Core: Perf: Change for AGPE
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+
+                    sUxIsLoaded = true;
+                }
+                catch(Exception e) {
+                    Log.e(TAG,"BoostFramework() Ux Perf: Exception = " + e);
+                }
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            }
+        }
+    }
+
+/** @hide */
+    public int perfLockAcquire(int duration, int... list) {
+        int ret = -1;
+        try {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            if (sAcquireFunc != null) {
+                Object retVal = sAcquireFunc.invoke(mPerf, duration, list);
+                ret = (int)retVal;
+            }
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public int perfLockRelease() {
+        int ret = -1;
+        try {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            if (sReleaseFunc != null) {
+                Object retVal = sReleaseFunc.invoke(mPerf);
+                ret = (int)retVal;
+            }
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+// QTI_BEGIN: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+/** @hide */
+    public int perfHintRelease() {
+        int ret = -1;
+        try {
+            if (sPerfHintRelFunc != null) {
+                Object retVal = sPerfHintRelFunc.invoke(mPerf);
+                ret = (int)retVal;
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+// QTI_END: 2024-10-24: Performance: Added perf hint release support am: 9f4fce0d31
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+/** @hide */
+    public int perfLockReleaseHandler(int handle) {
+        int ret = -1;
+        try {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            if (sReleaseHandlerFunc != null) {
+                Object retVal = sReleaseHandlerFunc.invoke(mPerf, handle);
+                ret = (int)retVal;
+            }
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public int perfHint(int hint, String userDataStr) {
+        return perfHint(hint, userDataStr, -1, -1);
+    }
+
+/** @hide */
+    public int perfHint(int hint, String userDataStr, int userData) {
+        return perfHint(hint, userDataStr, userData, -1);
+    }
+
+/** @hide */
+    public int perfHint(int hint, String userDataStr, int userData1, int userData2) {
+        int ret = -1;
+        try {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            if (sPerfHintFunc != null) {
+                Object retVal = sPerfHintFunc.invoke(mPerf, hint, userDataStr, userData1, userData2);
+                ret = (int)retVal;
+            }
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+        } catch(Exception e) {
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public double getPerfHalVersion() {
+        double retVal = PERF_HAL_V22;
+        try {
+            if (sPerfGetPerfHalVerFunc != null) {
+                Object ret = sPerfGetPerfHalVerFunc.invoke(mPerf);
+                retVal = (double)ret;
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return retVal;
+    }
+
+/** @hide */
+    public int perfGetFeedback(int req, String pkg_name) {
+        int ret = -1;
+        try {
+            if (sFeedbackFunc != null) {
+                Object retVal = sFeedbackFunc.invoke(mPerf, req, pkg_name);
+                ret = (int)retVal;
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public int perfGetFeedbackExtn(int req, String pkg_name, int numArgs, int... list) {
+        int ret = -1;
+        try {
+            if (sFeedbackFuncExtn != null) {
+                Object retVal = sFeedbackFuncExtn.invoke(mPerf, req, pkg_name, numArgs, list);
+                ret = (int)retVal;
+            }
+        } catch(Exception e) {
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+
+/** @hide */
+    public int perfIOPrefetchStart(int pid, String pkgName, String codePath) {
+        int ret = -1;
+        try {
+            Object retVal = sIOPStart.invoke(mPerf, pid, pkgName, codePath);
+            ret = (int) retVal;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception " + e);
+        }
+        try {
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2019-05-30: Core: Perf: Change for AGPE
+             Object retVal = sUxIOPStart.invoke(mUxPerf, pid, pkgName, codePath);
+             ret = (int) retVal;
+         } catch (Exception e) {
+             Log.e(TAG, "Ux Perf Exception " + e);
+         }
+// QTI_END: 2019-05-30: Core: Perf: Change for AGPE
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+
+        return ret;
+    }
+
+/** @hide */
+    public int perfIOPrefetchStop() {
+        int ret = -1;
+        try {
+            Object retVal = sIOPStop.invoke(mPerf);
+            ret = (int) retVal;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public int perfUXEngine_events(int opcode, int pid, String pkgName, int lat) {
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2019-05-30: Core: Perf: Change for AGPE
+        return perfUXEngine_events(opcode, pid, pkgName, lat, null);
+     }
+
+/** @hide */
+    public int perfUXEngine_events(int opcode, int pid, String pkgName, int lat, String codePath) {
+// QTI_END: 2019-05-30: Core: Perf: Change for AGPE
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+        int ret = -1;
+        try {
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+            if (sUXEngineEvents == null) {
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                return ret;
+            }
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+// QTI_BEGIN: 2019-05-30: Core: Perf: Change for AGPE
+
+            Object retVal = sUXEngineEvents.invoke(mPerf, opcode, pid, pkgName, lat,codePath);
+// QTI_END: 2019-05-30: Core: Perf: Change for AGPE
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+            ret = (int) retVal;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception " + e);
+        }
+        return ret;
+    }
+
+
+/** @hide */
+    public String perfUXEngine_trigger(int opcode) {
+        String ret = null;
+        try {
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+            if (sUXEngineTrigger == null) {
+// QTI_BEGIN: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+                return ret;
+            }
+            Object retVal = sUXEngineTrigger.invoke(mPerf, opcode);
+            ret = (String) retVal;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception " + e);
+        }
+        return ret;
+    }
+// QTI_END: 2018-10-31: Core: IOP/UXE: This change is related to IOP and UXE Feature.
+
+/** @hide */
+    public String perfSyncRequest(int opcode) {
+        String ret = null;
+        try {
+            if (sPerfSyncRequest == null) {
+                return ret;
+            }
+            Object retVal = sPerfSyncRequest.invoke(mPerf, opcode);
+            ret = (String) retVal;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public String perfGetProp(String prop_name, String def_val) {
+        String ret = "";
+        try {
+            if (sPerfGetPropFunc != null) {
+                Object retVal = sPerfGetPropFunc.invoke(mPerf, prop_name, def_val);
+                ret = (String)retVal;
+            }else {
+                ret = def_val;
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public int perfLockAcqAndRelease(int handle, int duration, int numArgs,int reserveNumArgs, int... list) {
+        int ret = -1;
+        try {
+            if (sAcqAndReleaseFunc != null) {
+                Object retVal = sAcqAndReleaseFunc.invoke(mPerf, handle, duration, numArgs, reserveNumArgs, list);
+                ret = (int)retVal;
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public void perfEvent(int eventId, String pkg_name) {
+        perfEvent(eventId, pkg_name, 0);
+    }
+
+/** @hide */
+    public void perfEvent(int eventId, String pkg_name, int numArgs, int... list) {
+        try {
+            if (sPerfEventFunc != null) {
+                sPerfEventFunc.invoke(mPerf, eventId, pkg_name, numArgs, list);
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+    }
+
+/** @hide */
+    public int perfHintAcqRel(int handle, int hint, String pkg_name) {
+        return perfHintAcqRel(handle, hint, pkg_name, -1, -1, 0);
+    }
+
+/** @hide */
+    public int perfHintAcqRel(int handle, int hint, String pkg_name, int duration) {
+        return perfHintAcqRel(handle, hint, pkg_name, duration, -1, 0);
+    }
+
+/** @hide */
+    public int perfHintAcqRel(int handle, int hint, String pkg_name, int duration, int hintType) {
+        return perfHintAcqRel(handle, hint, pkg_name, duration, hintType, 0);
+    }
+
+/** @hide */
+    public int perfHintAcqRel(int handle, int hint, String pkg_name, int duration,
+                              int hintType, int numArgs, int... list) {
+        int ret = -1;
+        try {
+            if (sperfHintAcqRelFunc != null) {
+                Object retVal = sperfHintAcqRelFunc.invoke(mPerf,handle, hint, pkg_name,
+                                                           duration, hintType, numArgs, list);
+                ret = (int)retVal;
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+/** @hide */
+    public int perfHintRenew(int handle, int hint, String pkg_name) {
+        return perfHintRenew(handle, hint, pkg_name, -1, -1, 0);
+    }
+
+/** @hide */
+    public int perfHintRenew(int handle, int hint, String pkg_name, int duration) {
+        return perfHintRenew(handle, hint, pkg_name, duration, -1, 0);
+    }
+
+/** @hide */
+    public int perfHintRenew(int handle, int hint, String pkg_name, int duration, int hintType) {
+        return perfHintRenew(handle, hint, pkg_name, duration, hintType, 0);
+    }
+
+/** @hide */
+    public int perfHintRenew(int handle, int hint, String pkg_name, int duration,
+                             int hintType, int numArgs, int... list) {
+        int ret = -1;
+        try {
+            if (sperfHintRenewFunc != null) {
+                Object retVal = sperfHintRenewFunc.invoke(mPerf,handle, hint, pkg_name,
+                                                          duration, hintType, numArgs, list);
+                ret = (int)retVal;
+            }
+        } catch(Exception e) {
+            Log.e(TAG,"Exception " + e);
+        }
+        return ret;
+    }
+
+    /** @hide */
+    public static class ScrollOptimizer {
+        /** @hide */
+        public static final int FLING_START = 1;
+        /** @hide */
+        public static final int FLING_END = 0;
+        private static final String SCROLL_OPT_PROP = "ro.vendor.perf.scroll_opt";
+        private static final String QXPERFORMANCE_JAR =
+                "/system/framework/QXPerformance.jar";
+        private static final String SCROLL_OPT_CLASS =
+                "com.qualcomm.qti.QXPerformance.ScrollOptimizer";
+        private static boolean sScrollOptProp = false;
+        private static boolean sScrollOptEnable = false;
+        private static boolean sQXIsLoaded = false;
+        private static Class<?> sQXPerfClass = null;
+        private static Method sSetFrameInterval = null;
+        private static Method sDisableOptimizer = null;
+        private static Method sSetBLASTBufferQueue = null;
+        private static Method sSetMotionType = null;
+        private static Method sSetVsyncTime = null;
+        private static Method sSetUITaskStatus = null;
+        private static Method sSetFlingFlag = null;
+        private static Method sShouldUseVsync = null;
+        private static Method sGetFrameDelay = null;
+        private static Method sGetAdjustedAnimationClock = null;
+
+        private static void initQXPerfFuncs() {
+            if (sQXIsLoaded) return;
+
+            try {
+                sScrollOptProp = SystemProperties.getBoolean(SCROLL_OPT_PROP, false);
+                if (!sScrollOptProp) {
+                    sScrollOptEnable = false;
+                    sQXIsLoaded = true;
+                    return;
+                }
+
+                PathClassLoader qXPerfClassLoader = new PathClassLoader(
+                        QXPERFORMANCE_JAR, ClassLoader.getSystemClassLoader());
+                sQXPerfClass = qXPerfClassLoader.loadClass(SCROLL_OPT_CLASS);
+                Class[] argClasses = new Class[]{long.class};
+                sSetFrameInterval = sQXPerfClass.getMethod(
+                        "setFrameInterval", argClasses);
+
+                argClasses = new Class[]{boolean.class};
+                sDisableOptimizer = sQXPerfClass.getMethod("disableOptimizer", argClasses);
+
+                argClasses = new Class[]{BLASTBufferQueue.class};
+                sSetBLASTBufferQueue = sQXPerfClass.getMethod("setBLASTBufferQueue", argClasses);
+
+                argClasses = new Class[]{int.class};
+                sSetMotionType = sQXPerfClass.getMethod("setMotionType", argClasses);
+
+                argClasses = new Class[]{long.class};
+                sSetVsyncTime = sQXPerfClass.getMethod("setVsyncTime", argClasses);
+
+                argClasses = new Class[]{boolean.class};
+                sSetUITaskStatus = sQXPerfClass.getMethod("setUITaskStatus", argClasses);
+
+                argClasses = new Class[]{int.class};
+                sSetFlingFlag = sQXPerfClass.getMethod("setFlingFlag", argClasses);
+
+                sShouldUseVsync = sQXPerfClass.getMethod("shouldUseVsync");
+
+                argClasses = new Class[]{long.class};
+                sGetFrameDelay = sQXPerfClass.getMethod("getFrameDelay", argClasses);
+
+                argClasses = new Class[]{long.class};
+                sGetAdjustedAnimationClock = sQXPerfClass.getMethod(
+                        "getAdjustedAnimationClock", argClasses);
+            } catch (Exception e) {
+                Log.e(TAG, "initQXPerfFuncs failed");
+                e.printStackTrace();
+            } finally {
+                // If frameworks and perf changes don't match(may not built together)
+                // or other exception, need to set sQXIsLoaded as true to avoid retry.
+                sQXIsLoaded = true;
+            }
+        }
+
+        /** @hide */
+        public static void setFrameInterval(long frameIntervalNanos) {
+            if (sQXIsLoaded) {
+                if (sScrollOptEnable && sSetFrameInterval != null) {
+                    try {
+                        sSetFrameInterval.invoke(null, frameIntervalNanos);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+                return;
+            }
+            Thread initThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    synchronized(ScrollOptimizer.class) {
+                        try {
+                            initQXPerfFuncs();
+                            if (sScrollOptProp && sSetFrameInterval != null) {
+                                sSetFrameInterval.invoke(null, frameIntervalNanos);
+                                sScrollOptEnable = true;
+                            }
+                        } catch (Exception e) {
+                            Log.e(TAG, "Failed to run initThread.");
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            });
+            initThread.start();
+        }
+
+        /** @hide */
+        public static void disableOptimizer(boolean disabled) {
+            if (sScrollOptEnable && sDisableOptimizer != null) {
+                try {
+                    sDisableOptimizer.invoke(null, disabled);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        /** @hide */
+        public static void setBLASTBufferQueue(BLASTBufferQueue blastBufferQueue) {
+            if (sScrollOptEnable && sSetBLASTBufferQueue != null) {
+                try {
+                    sSetBLASTBufferQueue.invoke(null, blastBufferQueue);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        /** @hide */
+        public static void setMotionType(int eventType) {
+            if (sScrollOptEnable && sSetMotionType != null) {
+                try {
+                    sSetMotionType.invoke(null, eventType);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        /** @hide */
+        public static void setVsyncTime(long vsyncTimeNanos) {
+            if (sScrollOptEnable && sSetVsyncTime != null) {
+                try {
+                    sSetVsyncTime.invoke(null, vsyncTimeNanos);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        /** @hide */
+        public static void setUITaskStatus(boolean running) {
+            if (sScrollOptEnable && sSetUITaskStatus != null) {
+                try {
+                    sSetUITaskStatus.invoke(null, running);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        /** @hide */
+        public static void setFlingFlag(int flag) {
+            if (sScrollOptEnable && sSetFlingFlag != null) {
+                try {
+                    sSetFlingFlag.invoke(null, flag);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+
+        /** @hide */
+        public static boolean shouldUseVsync(boolean defaultVsyncFlag) {
+            boolean useVsync = defaultVsyncFlag;
+            if (sScrollOptEnable && sShouldUseVsync != null) {
+                try {
+                    Object retVal = sShouldUseVsync.invoke(null);
+                    useVsync = (boolean)retVal;
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            return useVsync;
+        }
+
+        /** @hide */
+        public static long getFrameDelay(long defaultDelay, long lastFrameTimeNanos) {
+            long frameDelay = defaultDelay;
+            if (sScrollOptEnable && sGetFrameDelay != null) {
+                try {
+                    Object retVal = sGetFrameDelay.invoke(null, lastFrameTimeNanos);
+                    frameDelay = (long)retVal;
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            return frameDelay;
+        }
+
+        /** @hide */
+        public static long getAdjustedAnimationClock(long frameTimeNanos) {
+            long newFrameTimeNanos = frameTimeNanos;
+            if (sScrollOptEnable && sGetAdjustedAnimationClock != null) {
+                try {
+                    Object retVal = sGetAdjustedAnimationClock.invoke(null,
+                            frameTimeNanos);
+                    newFrameTimeNanos = (long)retVal;
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+            return newFrameTimeNanos;
+        }
+    }
+
+    //UI PERF START
+    private static class LRUMap<K,V> extends LinkedHashMap<K,V> {
+        private final int maxSize;
+
+        LRUMap(int maxSize) {
+            super(100, 0.75f, true);
+            this.maxSize = maxSize;
+        }
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<K,V> eldest) {
+            return size() > maxSize;
+        }
+    }
+
+    private static class UIPerfMode {
+        private static UIPerfMode instance = null;
+        private static String UI_PERF_ENABLE = "sys.ui.perfmode.enable";
+        private static String UI_PERF_ENHANCEMENT = "ro.vendor.ui.perfmode_enhance";
+        private static String UI_PERF_DYNAMIC_FPS = "sys.ui.perfmode_dynamic_fps";
+        private static String UI_PERF_SCENE_DETECT_ENABLE =
+                        "ro.vendor.perfmode_scene_detect.enable";
+        private static String UI_PERF_CPU_CORE_L_CONFIG =
+                        "ro.vendor.perfmode_scene_detect.cpu_core_l_config";
+        private static String UI_PERF_THP_16K_CONFIG =
+                        "ro.vendor.perfmode_scene_detect.thp_16k_config";
+        private static final int TEST_START_ACTIVITY = 0;
+        private Context mContext;
+        private String[] mUIPerfProcs = null;
+        private String[] mLegacyUIPerfProcs = null;
+        private String[] mIgnoreProcs = null;
+        private String[] mUIPerfGpuActivities = null;
+        private String[] mUIPerfCpuActivities = null;
+        private String[] mUIPerfCpuGpuActivities = null;
+        private String[] mUIPerfCpuAggressive = null;
+        private String[] mUIPerfLowFpsActivities = null;
+        private String[] mUIPerfDefFpsActivities = null;
+        private String[] mUIPerfFullSequenceActivities = null;
+        private boolean mUiPerfInited = false;
+        private UiPerfProcsObserver observer = null;
+        private boolean mUIPerfEnhance = false;
+        private BoostFramework mPerf = new BoostFramework();
+        private LRUMap<String,Boolean> mLRUMap = new LRUMap(30);
+        private Float mMaxDisplayFps = null;
+        private Float mMinDisplayFps = null;
+        private Float mDefaultMin = null;
+        private Float mDefaultPeak = null;
+        private Float mCurrentRefresh = null;
+        private boolean mSceneDetectEnabled = false;
+        private HandlerTaskScheduler mOptTaskScheduler = new HandlerTaskScheduler();
+        private HandlerTaskScheduler mCpuCheckScheduler = new HandlerTaskScheduler();
+        private SceneDetectConfig mCpuCoreLSceneDetectConfig = new SceneDetectConfig();
+        private SceneDetectConfig mTHPSceneDetectConfig = new SceneDetectConfig();
+        private volatile boolean mInSceneDetecting = false;
+        private volatile int mNextActivityStage = 0;
+        private volatile String mPreviousActivityName = "";
+        private PerfHintExecutor mTHPHintExecutor = new PerfHintExecutor(mPerf);
+        private PerfHintExecutor mCpuCoreLHintExecutor = new PerfHintExecutor(mPerf);
+
+        private class UiPerfProcsObserver extends ContentObserver {
+            private Context mContext = null;
+            UiPerfProcsObserver(Context context) {
+                super(null);
+                mContext = context;
+            }
+
+            public void onChange(boolean selfChange, Uri uri) {
+                try {
+                    long callingId = Binder.clearCallingIdentity();
+                    if (Settings.Global.getUriFor(KEY_PKGS).equals(uri)) {
+                        synchronized (UIPerfMode.this) {
+                            update();
+                        }
+                    }
+                    Binder.restoreCallingIdentity(callingId);
+                } catch (Exception e) {}
+            }
+        }
+
+        /** @hide */
+        public static UIPerfMode getInstance(Context context) {
+            synchronized(UIPerfMode.class) {
+                if (!ActivityThread.isSystem() ||
+                        !SystemProperties.getBoolean(UI_PERF_ENABLE, false)) {
+                    return null;
+                }
+                if (context != null) {
+                    if (instance == null) {
+                        instance = new UIPerfMode(context);
+                        if (!instance.isInit()) {
+                            instance.clean();
+                            instance = null;
+                        }
+                    }
+                    return instance;
+                }
+                return null;
+            }
+        }
+
+        private UIPerfMode(Context context) {
+            if (context != null) {
+                mContext = context.getApplicationContext();
+            }
+            try {
+                if (mContext != null) {
+                    long callingId = Binder.clearCallingIdentity();
+                    update();
+                    observer = new UiPerfProcsObserver(mContext);
+                    mContext.getContentResolver()
+                            .registerContentObserver(Settings.Global.getUriFor(KEY_PKGS),
+                                                     false, observer);
+                    mUiPerfInited = true;
+                    Binder.restoreCallingIdentity(callingId);
+
+                    if (mPerf != null) {
+                        mUIPerfEnhance =
+                            Boolean.parseBoolean(mPerf.perfGetProp(UI_PERF_ENHANCEMENT,
+                                                                   "false"));
+                        mSceneDetectEnabled =
+                            Boolean.parseBoolean(mPerf.perfGetProp(UI_PERF_SCENE_DETECT_ENABLE,
+                                                                    "false"));
+                        mCpuCoreLSceneDetectConfig.loadConfig(mPerf.perfGetProp(
+                                                UI_PERF_CPU_CORE_L_CONFIG, ""));
+                        mTHPSceneDetectConfig.loadConfig(mPerf.perfGetProp(
+                                                UI_PERF_THP_16K_CONFIG, ""));
+                    }
+                }
+            } catch (Exception e) {
+                mUiPerfInited = false;
+            }
+        }
+
+        private void findDisplayFPS() {
+            if (mContext != null || !SystemProperties.getBoolean(UI_PERF_DYNAMIC_FPS, false)) {
+                DisplayManager dm = mContext.getSystemService(DisplayManager.class);
+                Display display = dm.getDisplay(Display.DEFAULT_DISPLAY);
+                float minFps = 0;
+                float maxFps = 0;
+                if (display != null) {
+                    Display.Mode[] modes = display.getSupportedModes();
+                    for(Display.Mode mode : modes) {
+                        if (Math.round(mode.getRefreshRate()) > maxFps) {
+                            maxFps = mode.getRefreshRate();
+                        }
+                        if (minFps == 0 || Math.round(mode.getRefreshRate()) < minFps) {
+                            minFps = mode.getRefreshRate();
+                        }
+                    }
+                    mMaxDisplayFps = new Float(maxFps);
+                    mMinDisplayFps = new Float(minFps);
+                }
+            }
+        }
+        private void update() {
+            try {
+                if (mContext != null) {
+                    String str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_PKGS);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfProcs = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_GPU_PREFER);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfGpuActivities = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_CPU_PREFER);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfCpuActivities = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_CPU_GPU);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfCpuGpuActivities = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_CPU_AGGRESSIVE);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfCpuAggressive = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_LEGACY_UI_PERF_PKGS);
+                    if (str != null && !str.isEmpty()) {
+                        mLegacyUIPerfProcs = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_IGNORE_PKGS);
+                    if (str != null && !str.isEmpty()) {
+                        mIgnoreProcs = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_LOW_FPS_PREFER);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfLowFpsActivities = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_FPS_BY_DEFAULT);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfDefFpsActivities = str.split(";");
+                    }
+                    str = Settings.Global.getString(mContext.getContentResolver(),
+                                     KEY_FULL_SEQUENCE);
+                    if (str != null && !str.isEmpty()) {
+                        mUIPerfFullSequenceActivities = str.split(";");
+                    }
+                }
+            } catch (Exception e) {
+            }
+        }
+
+        /** @hide */
+        public void clean() {
+            mOptTaskScheduler.cancel();
+            mCpuCheckScheduler.cancel();
+            if (mContext != null && observer != null) {
+                try {
+                    mContext.getContentResolver().unregisterContentObserver(observer);
+                } catch (Exception e) {}
+            }
+        }
+
+        /** @hide */
+        public boolean isInit() {
+            return mUiPerfInited;
+        }
+
+        /** @hide */
+        public boolean shouldUseUiPerf(String pkgName) {
+            if (pkgName == null || pkgName.isEmpty()) {
+                return false;
+            }
+            synchronized (this) {
+                if (mUIPerfProcs != null) {
+                    for (int i = 0; i < mUIPerfProcs.length; i++) {
+                        if (pkgName.equals(mUIPerfProcs[i])) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return enhance(pkgName);
+        }
+
+        private boolean enhance(String pkgName) {
+            if (mUIPerfEnhance) {
+                if (mContext != null) {
+                    PackageManager pm = mContext.getPackageManager();
+                    if (pm != null) {
+                        try {
+                            ApplicationInfo aInfo = pm.getApplicationInfo(pkgName, 0);
+                            if (aInfo == null) {
+                                return false;
+                            }
+                            if (aInfo.isOdm() || aInfo.isOem()
+                                              || aInfo.isProduct()
+                                              || aInfo.isSystemApp()
+                                              || aInfo.isSystemExt()
+                                              || aInfo.isUpdatedSystemApp()
+                                              || aInfo.isVendor()
+                                              || aInfo.isPrivilegedApp()
+                                              || aInfo.isSignedWithPlatformKey()) {
+                                return false;
+                            }
+                        } catch (PackageManager.NameNotFoundException e) {
+                            return false;
+                        }
+                    }
+                }
+                synchronized (this) {
+                    if (mIgnoreProcs != null) {
+                        for (int i = 0; i < mIgnoreProcs.length; i++) {
+                            if (pkgName.equals(mIgnoreProcs[i])) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                if (mLRUMap.containsKey(pkgName)) {
+                    return mLRUMap.get(pkgName);
+                }
+                if (mPerf != null) {
+                    int type = mPerf.perfGetFeedback(VENDOR_FEEDBACK_WORKLOAD_TYPE, pkgName);
+                    if (type == WorkloadType.APP_OF_INTEREST) {
+                       mLRUMap.put(pkgName, true);
+                       return true;
+                    }
+                }
+                mLRUMap.put(pkgName, false);
+            }
+            return false;
+        }
+
+        /** @hide */
+        public void updateUiPerfState(String pkgName, int pid) {
+            if (shouldUseUiPerf(pkgName)) {
+                SystemProperties.set(UI_PERF_PROP, Integer.toString(pid));
+            } else {
+                SystemProperties.set(UI_PERF_PROP, "0");
+            }
+        }
+
+        /** @hide */
+        public int getLegacyUiPerfHint(String pkgName) {
+            int hint = -1;
+            if (pkgName == null || pkgName.isEmpty()) {
+                displayRefreshRateRestore();
+                return hint;
+            }
+            synchronized (this) {
+                if (SystemProperties.getBoolean(UI_LEGACY_PERF_PROP, false) &&
+                        mLegacyUIPerfProcs != null) {
+                    for (int i = 0; i < mLegacyUIPerfProcs.length; i++) {
+                        if (pkgName.equals(mLegacyUIPerfProcs[i])) {
+                            hint = VENDOR_HINT_PERFORMANCE_MODE;
+                            usePeakDisplayRefreshRate();
+                            return hint;
+                        }
+                    }
+                }
+            }
+            if (!shouldUseUiPerf(pkgName)) {
+                displayRefreshRateRestore();
+            }
+            return hint;
+        }
+
+        /** @hide */
+        public int getUiPerfHint(String activityName) {
+            int hint = -1;
+            if (activityName == null || activityName.isEmpty()) {
+                return hint;
+            }
+            synchronized (this) {
+                if (mUIPerfGpuActivities != null) {
+                    for (int i = 0; i < mUIPerfGpuActivities.length; i++) {
+                        if (activityName.equals(mUIPerfGpuActivities[i])) {
+                            hint = VENDOR_HINT_SCENARIO_GPU;
+                            return hint;
+                        }
+                    }
+                }
+                if (mUIPerfCpuActivities != null) {
+                    for (int i = 0; i < mUIPerfCpuActivities.length; i++) {
+                        if (activityName.equals(mUIPerfCpuActivities[i])) {
+                            hint = VENDOR_HINT_SCENARIO_CPU;
+                            return hint;
+                        }
+                    }
+                }
+                if (mUIPerfCpuGpuActivities != null) {
+                    for (int i = 0; i < mUIPerfCpuGpuActivities.length; i++) {
+                        if (activityName.equals(mUIPerfCpuGpuActivities[i])) {
+                            hint = VENDOR_HINT_SCENARIO_CPU_GPU;
+                            return hint;
+                        }
+                    }
+                }
+                if (mUIPerfCpuAggressive != null) {
+                    for (int i = 0; i < mUIPerfCpuAggressive.length; i++) {
+                        if (activityName.equals(mUIPerfCpuAggressive[i])) {
+                            hint = VENDOR_HINT_SCENARIO_CPU_AGGRESSIVE;
+                            return hint;
+                        }
+                    }
+                }
+            }
+            return hint;
+        }
+
+        private void handleUiPerfFullTest (String activityName) {
+            if (!mSceneDetectEnabled) {
+                return;
+            }
+            synchronized (this) {
+                if (activityName == null || activityName.isEmpty()) {
+                    if (mInSceneDetecting) {
+                        exitFullTest();
+                    }
+                    return;
+                }
+                if (!activityName.equals(mPreviousActivityName)) {
+                    if ((mUIPerfFullSequenceActivities != null) &&
+                        (mNextActivityStage < mUIPerfFullSequenceActivities.length) &&
+                        (activityName.equals(mUIPerfFullSequenceActivities[mNextActivityStage]))) {
+                        if (mNextActivityStage == TEST_START_ACTIVITY) {
+                            mInSceneDetecting = true;
+                        }
+                        if (mNextActivityStage == mCpuCoreLSceneDetectConfig.activitySequence) {
+                            mOptTaskScheduler.schedule(
+                                () -> checkCpuWorkloadForOpts(mCpuCoreLSceneDetectConfig.waitTime,
+                                                    mCpuCoreLSceneDetectConfig.workloadThreshold,
+                                                    VENDOR_HINT_BM_CPU_CORECTL_L,
+                                                    mCpuCoreLSceneDetectConfig.hintDuration),
+                                mCpuCoreLSceneDetectConfig.timer
+                            );
+                        }
+                        if (mNextActivityStage == mTHPSceneDetectConfig.activitySequence) {
+                            mTHPHintExecutor.acquire(VENDOR_HINT_BM_THP_UPDATE,
+                                                    "android",
+                                                    mTHPSceneDetectConfig.hintDuration);
+                        }
+                        mPreviousActivityName = activityName;
+                        mNextActivityStage++;
+                    } else {
+                        if (mInSceneDetecting) {
+                            exitFullTest();
+                        }
+                    }
+                }
+            }
+        }
+
+        private void checkCpuWorkloadForOpts(int duration, int threshold,
+                                            int hint, int hintDuration) {
+            CpuWorkloadReader.CpuSnapshot first = CpuWorkloadReader.readSnapshot();
+            if (first == null) return;
+            scheduleNextCpuCheck(
+                System.currentTimeMillis() + duration, threshold, hint, hintDuration, first);
+        }
+
+        private void scheduleNextCpuCheck(long deadline, int threshold,
+                                        int hint, int hintDuration,
+                                        CpuWorkloadReader.CpuSnapshot prev) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) return;
+
+            mCpuCheckScheduler.schedule(() -> {
+                CpuWorkloadReader.CpuSnapshot curr = CpuWorkloadReader.readSnapshot();
+                int workload = curr != null ? CpuWorkloadReader.computeWorkload(prev, curr) : 0;
+                synchronized (UIPerfMode.this) {
+                    if (!mInSceneDetecting) return;
+                    if (curr != null && workload > threshold) {
+                        mCpuCoreLHintExecutor.acquire(hint, "android", hintDuration);
+                        return;
+                    }
+                    scheduleNextCpuCheck(deadline, threshold, hint, hintDuration,
+                            curr != null ? curr : prev);
+                }
+            }, Math.min(500, remaining));
+        }
+
+        private void exitFullTest() {
+            mInSceneDetecting = false;
+            mNextActivityStage = 0;
+            mOptTaskScheduler.cancel();
+            mCpuCheckScheduler.cancel();
+            mPreviousActivityName = "";
+            mTHPHintExecutor.release();
+            mCpuCoreLHintExecutor.release();
+        }
+
+        private void usePeakDisplayRefreshRate() {
+            if (mContext == null) {
+                return;
+            }
+            synchronized(this) {
+                long callingId = Binder.clearCallingIdentity();
+                if (mDefaultPeak == null && mDefaultMin == null) {
+                    float min = Settings.System.getFloat(mContext.getContentResolver(),
+                                    Settings.System.MIN_REFRESH_RATE, 0);
+                    float peak = Settings.System.getFloat(mContext.getContentResolver(),
+                                    Settings.System.PEAK_REFRESH_RATE, 0);
+                    mDefaultPeak = new Float(peak);
+                    mDefaultMin = new Float(min);
+                }
+                if (mMaxDisplayFps == null && mMinDisplayFps == null) {
+                    findDisplayFPS();
+                }
+                if (mMaxDisplayFps != null) {
+                    float fps = mMaxDisplayFps.floatValue();
+                    if (mCurrentRefresh == null || mCurrentRefresh.floatValue() != fps) {
+                        Settings.System.putFloat(mContext.getContentResolver(),
+                            Settings.System.MIN_REFRESH_RATE, fps);
+                        Settings.System.putFloat(mContext.getContentResolver(),
+                            Settings.System.PEAK_REFRESH_RATE, fps);
+                        mCurrentRefresh = new Float(fps);
+                    }
+                }
+                Binder.restoreCallingIdentity(callingId);
+            }
+        }
+
+        public void pickDisplayRefreshRate(String activityName) {
+            if (mContext == null || activityName == null || activityName.isEmpty() || !SystemProperties.getBoolean(UI_PERF_DYNAMIC_FPS, false)) {
+                return;
+            }
+            if (mUIPerfDefFpsActivities != null) {
+                for (String str : mUIPerfDefFpsActivities) {
+                    if (str.equals(activityName)) {
+                        displayRefreshRateRestore();
+                        return;
+                    }
+                }
+            }
+            synchronized(this) {
+                long callingId = Binder.clearCallingIdentity();
+                if (mDefaultPeak == null && mDefaultMin == null) {
+                    float min = Settings.System.getFloat(mContext.getContentResolver(),
+                                    Settings.System.MIN_REFRESH_RATE, 0);
+                    float peak = Settings.System.getFloat(mContext.getContentResolver(),
+                                    Settings.System.PEAK_REFRESH_RATE, 0);
+                    mDefaultPeak = new Float(peak);
+                    mDefaultMin = new Float(min);
+                }
+                boolean lowFpsPrefer = false;
+                if (mUIPerfLowFpsActivities != null) {
+                    for (String str : mUIPerfLowFpsActivities) {
+                        if (str.equals(activityName)) {
+                            lowFpsPrefer = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (mMaxDisplayFps == null || mMinDisplayFps == null) {
+                    findDisplayFPS();
+                }
+                if (mMaxDisplayFps != null && mMinDisplayFps != null) {
+                    float fps = lowFpsPrefer? mMinDisplayFps.floatValue() : mMaxDisplayFps.floatValue();
+
+                    if (mCurrentRefresh == null || mCurrentRefresh.floatValue() != fps) {
+
+                        Settings.System.putFloat(mContext.getContentResolver(),
+                            Settings.System.MIN_REFRESH_RATE, fps);
+                        Settings.System.putFloat(mContext.getContentResolver(),
+                            Settings.System.PEAK_REFRESH_RATE, fps);
+                        mCurrentRefresh = new Float(fps);
+                    }
+                }
+                Binder.restoreCallingIdentity(callingId);
+            }
+        }
+
+        public void displayRefreshRateRestore() {
+            if (mContext == null || !SystemProperties.getBoolean(UI_PERF_DYNAMIC_FPS, false)) {
+                return;
+            }
+            synchronized(this) {
+                if (mDefaultPeak != null && mDefaultMin != null
+                                         && mCurrentRefresh != null) {
+                    long callingId = Binder.clearCallingIdentity();
+                    float min = Settings.System.getFloat(mContext.getContentResolver(),
+                                    Settings.System.MIN_REFRESH_RATE, 0);
+                    float peak = Settings.System.getFloat(mContext.getContentResolver(),
+                                    Settings.System.PEAK_REFRESH_RATE, 0);
+                    if (min == mCurrentRefresh.floatValue()) {
+                        Settings.System.putFloat(mContext.getContentResolver(),
+                            Settings.System.MIN_REFRESH_RATE, mDefaultMin.floatValue());
+                    }
+                    if (peak == mCurrentRefresh.floatValue()) {
+                        Settings.System.putFloat(mContext.getContentResolver(),
+                            Settings.System.PEAK_REFRESH_RATE, mDefaultPeak.floatValue());
+                    }
+                    mDefaultPeak = null;
+                    mDefaultMin = null;
+                    mCurrentRefresh = null;
+                    Binder.restoreCallingIdentity(callingId);
+                }
+            }
+        }
+
+        private class SceneDetectConfig {
+            public int activitySequence;
+            public int waitTime;
+            public int workloadThreshold;
+            public int timer;
+            public int hintDuration;
+
+            SceneDetectConfig() {
+                activitySequence = -1;
+                waitTime = 0;
+                workloadThreshold = 0;
+                timer = 0;
+                hintDuration = 0;
+            }
+
+            public void loadConfig(String config) {
+                if (config == null || config.isEmpty()) {
+                    return;
+                }
+                int[] vals = new int[5];
+                String[] parts = config.split("_");
+                for (int i = 0; i < vals.length; i++) {
+                    if (i < parts.length) {
+                        try {
+                            vals[i] = Integer.parseInt(parts[i]);
+                        } catch (NumberFormatException e) {
+                            vals[i] = -1;
+                        }
+                    }
+                }
+                activitySequence = vals[0];
+                waitTime = vals[1];
+                workloadThreshold = vals[2];
+                timer = vals[3];
+                hintDuration = vals[4];
+            }
+        }
+    }
+
+    public void pickDisplayRefreshRate(Context context, String activityName) {
+        UIPerfMode uiPerf = UIPerfMode.getInstance(context);
+        if (uiPerf != null) {
+            uiPerf.pickDisplayRefreshRate(activityName);
+        }
+    }
+
+    public void displayRefreshRateRestore(Context context) {
+        UIPerfMode uiPerf = UIPerfMode.getInstance(context);
+        if (uiPerf != null) {
+            uiPerf.displayRefreshRateRestore();
+        }
+    }
+
+    /** @hide */
+    public boolean shouldUseUiPerf(Context context, String pkgName) {
+        UIPerfMode uiPerf = UIPerfMode.getInstance(context);
+        if (uiPerf != null) {
+            return uiPerf.shouldUseUiPerf(pkgName);
+        }
+        return false;
+    }
+
+    /** @hide */
+    public void updateUiPerfState(Context context, String pkgName, int pid) {
+        UIPerfMode uiPerf = UIPerfMode.getInstance(context);
+        if (uiPerf != null) {
+            uiPerf.updateUiPerfState(pkgName, pid);
+        }
+    }
+
+    /** @hide */
+    public int getLegacyUiPerfHint(Context context, String pkgName) {
+        int hint = -1;
+        UIPerfMode uiPerf = UIPerfMode.getInstance(context);
+        if (uiPerf != null) {
+            hint = uiPerf.getLegacyUiPerfHint(pkgName);
+        }
+        return hint;
+    }
+
+    /** @hide */
+    public int getUiPerfHint(Context context, String activityName) {
+        int hint = -1;
+        UIPerfMode uiPerf = UIPerfMode.getInstance(context);
+        if (uiPerf != null) {
+            hint = uiPerf.getUiPerfHint(activityName);
+        }
+        return hint;
+    }
+
+    /** @hide */
+    public void handleUiPerfFullTest(Context context, String activityName) {
+        UIPerfMode uiPerf = UIPerfMode.getInstance(context);
+        if (uiPerf != null) {
+            uiPerf.handleUiPerfFullTest(activityName);
+        }
+    }
+
+    /** @hide */
+    public static boolean shouldUseUiPerf() {
+        if (SystemProperties.getInt(UI_PERF_PROP, 0) == Process.myPid()) {
+            return true;
+        }
+        return false;
+    }
+
+    /** @hide */
+    private static class CpuWorkloadReader {
+        private static final String PROC_STAT = "/proc/stat";
+        private static final int TICK_FIELDS = 8;
+        private static final int NUM_CORES = 8;
+
+        /** @hide */
+        public static class CpuSnapshot {
+            public final long busyTicks;
+            public final long totalTicks;
+
+            CpuSnapshot(long busyTicks, long totalTicks) {
+                this.busyTicks  = busyTicks;
+                this.totalTicks = totalTicks;
+            }
+        }
+
+        public static CpuSnapshot readSnapshot() {
+            try (BufferedReader reader = new BufferedReader(new FileReader(PROC_STAT))) {
+                String line = reader.readLine();
+                if (line == null || !line.startsWith("cpu ")) {
+                    Log.e(TAG, "CpuWorkloadReader: unexpected first line in " + PROC_STAT);
+                    return null;
+                }
+                String[] parts = line.substring("cpu ".length()).trim().split("\\s+");
+                long busyTicks = 0, totalTicks = 0;
+                for (int j = 0; j < TICK_FIELDS && j < parts.length; j++) {
+                    long val;
+                    try {
+                        val = Long.parseLong(parts[j]);
+                    } catch (NumberFormatException e) {
+                        Log.w(TAG, "CpuWorkloadReader: invalid tick value: " + parts[j]);
+                        val = 0;
+                    }
+                    totalTicks += val;
+                    if (j != 3 && j != 4) {
+                        busyTicks += val;
+                    }
+                }
+                return new CpuSnapshot(busyTicks, totalTicks);
+            } catch (IOException e) {
+                Log.e(TAG, "CpuWorkloadReader: failed to read " + PROC_STAT + ": " + e);
+                return null;
+            }
+        }
+
+        public static int computeWorkload(CpuSnapshot prev, CpuSnapshot curr) {
+            if (prev == null || curr == null) return 0;
+            long totalDelta = curr.totalTicks - prev.totalTicks;
+            if (totalDelta <= 0) return 0;
+            long busyDelta = curr.busyTicks - prev.busyTicks;
+            // Returns aggregate utilization scaled by NUM_CORES (0-800% for 8 cores),
+            // where 100 = one core fully loaded. Thresholds must be calibrated accordingly.
+            return (int) (busyDelta * NUM_CORES * 100 / totalDelta);
+        }
+    }
+
+    /** @hide */
+    private static class PerfHintExecutor {
+        private static final int INVALID_HANDLE = -1;
+
+        private final BoostFramework mPerf;
+        private int mHandle = INVALID_HANDLE;
+
+        PerfHintExecutor(BoostFramework perf) {
+            mPerf = perf;
+        }
+
+        public synchronized void acquire(int hint, String pkgName, int duration) {
+            if (mPerf == null) {
+                return;
+            }
+            mHandle = mPerf.perfHintAcqRel(mHandle, hint, pkgName, duration);
+        }
+
+        // Releases the active hint.  No-op if no hint is held.
+        public synchronized boolean release() {
+            if (mPerf == null || mHandle == INVALID_HANDLE) {
+                return false;
+            }
+            mPerf.perfLockReleaseHandler(mHandle);
+            mHandle = INVALID_HANDLE;
+            return true;
+        }
+
+    }
+
+    /** @hide */
+    private static class HandlerTaskScheduler {
+        private Handler mHandler;
+        private Runnable mPendingRunnable;
+
+        private Handler getHandler() {
+            if (mHandler == null) {
+                Looper looper = Looper.getMainLooper();
+                if (looper != null) {
+                    mHandler = new Handler(looper);
+                }
+            }
+            return mHandler;
+        }
+
+        public void schedule(Runnable task, long delayMs) {
+            synchronized (this) {
+                Handler h = getHandler();
+                if (h == null) return;
+                if (mPendingRunnable != null) {
+                    h.removeCallbacks(mPendingRunnable);
+                }
+                mPendingRunnable = task;
+                h.postDelayed(mPendingRunnable, delayMs);
+            }
+        }
+
+        public boolean cancel() {
+            synchronized (this) {
+                Handler h = getHandler();
+                if (mPendingRunnable != null && h != null) {
+                    h.removeCallbacks(mPendingRunnable);
+                    mPendingRunnable = null;
+                    return true;
+                }
+                return false;
+            }
+        }
+    }
+
+    //UI PERF END
+// QTI_BEGIN: 2018-02-20: Performance: BoostFramework: To Enhance performance.
+};
+// QTI_END: 2018-02-20: Performance: BoostFramework: To Enhance performance.

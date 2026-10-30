@@ -1,0 +1,1000 @@
+/*
+ * Copyright (C) 2008 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.systemui.statusbar.phone;
+
+import static android.app.admin.DevicePolicyResources.Strings.SystemUi.STATUS_BAR_WORK_ICON_ACCESSIBILITY;
+
+import android.annotation.Nullable;
+import android.app.ActivityTaskManager;
+import android.app.AlarmManager;
+import android.app.AlarmManager.AlarmClockInfo;
+import android.app.NotificationManager;
+import android.app.admin.DevicePolicyManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.content.res.Resources;
+import android.Manifest;
+import android.media.AudioManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+// QTI_BEGIN: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+import android.net.wifi.ScanResult;
+// QTI_END: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+import android.net.wifi.WifiManager;
+import android.nfc.NfcAdapter;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Process;
+import android.os.RemoteException;
+import android.os.UserHandle;
+import android.os.UserManager;
+import android.provider.Settings.Global;
+import android.service.notification.ZenModeConfig;
+import android.telecom.TelecomManager;
+import android.text.format.DateFormat;
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+import androidx.lifecycle.Observer;
+
+import com.android.internal.statusbar.StatusBarIcon;
+import com.android.systemui.broadcast.BroadcastDispatcher;
+import com.android.systemui.common.shared.model.Icon;
+import com.android.systemui.dagger.qualifiers.DisplayId;
+import com.android.systemui.dagger.qualifiers.Main;
+import com.android.systemui.dagger.qualifiers.UiBackground;
+import com.android.systemui.display.domain.interactor.ConnectedDisplayInteractor;
+import com.android.systemui.privacy.PrivacyItem;
+import com.android.systemui.privacy.PrivacyItemController;
+import com.android.systemui.privacy.PrivacyType;
+import com.android.systemui.privacy.logging.PrivacyLogger;
+import com.android.systemui.qs.tiles.RotationLockTile;
+import com.android.systemui.res.R;
+import com.android.systemui.screenrecord.ScreenRecordUxController;
+import com.android.systemui.settings.UserTracker;
+import com.android.systemui.statusbar.CommandQueue;
+import com.android.systemui.statusbar.phone.ui.StatusBarIconController;
+import com.android.systemui.statusbar.policy.BluetoothController;
+import com.android.systemui.statusbar.policy.DataSaverController;
+import com.android.systemui.statusbar.policy.DataSaverController.Listener;
+import com.android.systemui.statusbar.policy.DeviceProvisionedController;
+import com.android.systemui.statusbar.policy.DeviceProvisionedController.DeviceProvisionedListener;
+import com.android.systemui.statusbar.policy.FiveGServiceClient;
+import com.android.systemui.statusbar.policy.HotspotController;
+import com.android.systemui.statusbar.policy.KeyguardStateController;
+import com.android.systemui.statusbar.policy.LocationController;
+import com.android.systemui.statusbar.policy.NextAlarmController;
+import com.android.systemui.statusbar.policy.RotationLockController;
+import com.android.systemui.statusbar.policy.RotationLockController.RotationLockControllerCallback;
+import com.android.systemui.statusbar.policy.SensorPrivacyController;
+import com.android.systemui.statusbar.policy.UserInfoController;
+import com.android.systemui.statusbar.policy.ZenModeController;
+import com.android.systemui.statusbar.policy.domain.interactor.ZenModeInteractor;
+import com.android.systemui.statusbar.policy.domain.model.ZenModeInfo;
+import com.android.systemui.util.RingerModeTracker;
+import com.android.systemui.util.kotlin.JavaAdapter;
+import com.android.systemui.util.time.DateFormatUtil;
+import com.qti.extphone.AuxiliaryRadioIconInfo;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.Executor;
+
+import javax.inject.Inject;
+
+/**
+ * This class contains all of the policy about which icons are installed in the status bar at boot
+ * time. It goes through the normal API for icons, even though it probably strictly doesn't need to.
+ */
+public class PhoneStatusBarPolicy
+        implements BluetoothController.Callback,
+                CommandQueue.Callbacks,
+                RotationLockControllerCallback,
+                Listener,
+                DeviceProvisionedListener,
+                KeyguardStateController.Callback,
+                PrivacyItemController.Callback,
+                LocationController.LocationChangeCallback,
+                ScreenRecordUxController.StateChangeCallback {
+    private static final String TAG = "PhoneStatusBarPolicy";
+    private static final boolean DEBUG = Log.isLoggable(TAG, Log.DEBUG);
+
+    static final int LOCATION_STATUS_ICON_ID = PrivacyType.TYPE_LOCATION.getIconId();
+
+    private final String mSlotHotspot;
+    private final String mSlotBluetooth;
+    private final String mSlotTty;
+    private final String mSlotZen;
+    private final String mSlotMute;
+    private final String mSlotVibrate;
+    private final String mSlotAlarmClock;
+    private final String mSlotManagedProfile;
+    private final String mSlotRotate;
+    private final String mSlotHeadset;
+    private final String mSlotDataSaver;
+    private final String mSlotLocation;
+    private final String mSlotMicrophone;
+    private final String mSlotCamera;
+    private final String mSlotSensorsOff;
+    private final String mSlotScreenRecord;
+    private final String mSlotConnectedDisplay;
+    private final String mSlotNfc;
+    private final String mSlotFirewall;
+    private final int mDisplayId;
+    private final SharedPreferences mSharedPreferences;
+    private final DateFormatUtil mDateFormatUtil;
+    private final JavaAdapter mJavaAdapter;
+    private final ConnectedDisplayInteractor mConnectedDisplayInteractor;
+    private final TelecomManager mTelecomManager;
+
+    private final Handler mHandler;
+    private final HotspotController mHotspot;
+    private final NextAlarmController mNextAlarmController;
+    private final AlarmManager mAlarmManager;
+    private final UserInfoController mUserInfoController;
+    private final UserManager mUserManager;
+    private final UserTracker mUserTracker;
+    private final DevicePolicyManager mDevicePolicyManager;
+    private final StatusBarIconController mIconController;
+    private final CommandQueue mCommandQueue;
+    private final BroadcastDispatcher mBroadcastDispatcher;
+    private final Resources mResources;
+    private final RotationLockController mRotationLockController;
+    private final DataSaverController mDataSaver;
+    private final ZenModeController mZenController;
+    private final DeviceProvisionedController mProvisionedController;
+    private final KeyguardStateController mKeyguardStateController;
+    private final LocationController mLocationController;
+    private final PrivacyItemController mPrivacyItemController;
+    private final Executor mMainExecutor;
+    private final Executor mUiBgExecutor;
+    private final SensorPrivacyController mSensorPrivacyController;
+    private final RingerModeTracker mRingerModeTracker;
+    private final PrivacyLogger mPrivacyLogger;
+    private final ZenModeInteractor mZenModeInteractor;
+    private final ConnectivityManager mConnectivityManager;
+
+    private boolean mZenVisible;
+    private boolean mVibrateVisible;
+    private boolean mMuteVisible;
+    private boolean mCurrentUserSetup;
+
+    private boolean mProfileIconVisible = false;
+    private final Context mContext;
+    private final String mSlotTurboDsda;
+    private boolean mFirewallVisible = false;
+
+    private int mLastResumedActivityUid = -1;
+
+    private BluetoothController mBluetooth;
+    private AlarmClockInfo mNextAlarm;
+
+    private final FiveGServiceClient mFiveGServiceClient;
+    private NfcAdapter mAdapter;
+
+    @Inject
+    public PhoneStatusBarPolicy(Context context, StatusBarIconController iconController,
+            CommandQueue commandQueue, BroadcastDispatcher broadcastDispatcher,
+            @Main Executor mainExecutor, @UiBackground Executor uiBgExecutor, @Main Looper looper,
+            @Main Resources resources,
+            HotspotController hotspotController, BluetoothController bluetoothController,
+            NextAlarmController nextAlarmController, UserInfoController userInfoController,
+            RotationLockController rotationLockController, DataSaverController dataSaverController,
+            ZenModeController zenModeController,
+            DeviceProvisionedController deviceProvisionedController,
+            KeyguardStateController keyguardStateController,
+            LocationController locationController,
+            SensorPrivacyController sensorPrivacyController, AlarmManager alarmManager,
+            UserManager userManager, UserTracker userTracker,
+            DevicePolicyManager devicePolicyManager,
+            @Nullable TelecomManager telecomManager, @DisplayId int displayId,
+            @Main SharedPreferences sharedPreferences, DateFormatUtil dateFormatUtil,
+            RingerModeTracker ringerModeTracker,
+            PrivacyItemController privacyItemController,
+            PrivacyLogger privacyLogger,
+            ConnectedDisplayInteractor connectedDisplayInteractor,
+            ZenModeInteractor zenModeInteractor,
+            JavaAdapter javaAdapter, FiveGServiceClient fiveGServiceClient
+    ) {
+        mContext = context;
+        mIconController = iconController;
+        mCommandQueue = commandQueue;
+        mConnectedDisplayInteractor = connectedDisplayInteractor;
+        mBroadcastDispatcher = broadcastDispatcher;
+        mHandler = new Handler(looper);
+        mResources = resources;
+        mHotspot = hotspotController;
+        mBluetooth = bluetoothController;
+        mNextAlarmController = nextAlarmController;
+        mAlarmManager = alarmManager;
+        mUserInfoController = userInfoController;
+        mUserManager = userManager;
+        mUserTracker = userTracker;
+        mDevicePolicyManager = devicePolicyManager;
+        mRotationLockController = rotationLockController;
+        mDataSaver = dataSaverController;
+        mZenController = zenModeController;
+        mProvisionedController = deviceProvisionedController;
+        mKeyguardStateController = keyguardStateController;
+        mLocationController = locationController;
+        mPrivacyItemController = privacyItemController;
+        mSensorPrivacyController = sensorPrivacyController;
+        mMainExecutor = mainExecutor;
+        mUiBgExecutor = uiBgExecutor;
+        mTelecomManager = telecomManager;
+        mRingerModeTracker = ringerModeTracker;
+        mPrivacyLogger = privacyLogger;
+        mZenModeInteractor = zenModeInteractor;
+        mJavaAdapter = javaAdapter;
+        mFiveGServiceClient = fiveGServiceClient;
+        mSlotTurboDsda = resources.getString(R.string.status_bar_turbo_dsda);
+        mConnectivityManager = context.getSystemService(ConnectivityManager.class);
+
+        mSlotConnectedDisplay = resources.getString(
+                com.android.internal.R.string.status_bar_connected_display);
+        mSlotHotspot = resources.getString(com.android.internal.R.string.status_bar_hotspot);
+        mSlotBluetooth = resources.getString(com.android.internal.R.string.status_bar_bluetooth);
+        mSlotTty = resources.getString(com.android.internal.R.string.status_bar_tty);
+        mSlotZen = resources.getString(com.android.internal.R.string.status_bar_zen);
+        mSlotMute = resources.getString(com.android.internal.R.string.status_bar_mute);
+        mSlotVibrate = resources.getString(com.android.internal.R.string.status_bar_volume);
+        mSlotAlarmClock = resources.getString(com.android.internal.R.string.status_bar_alarm_clock);
+        mSlotManagedProfile = resources.getString(
+                com.android.internal.R.string.status_bar_managed_profile);
+        mSlotRotate = resources.getString(com.android.internal.R.string.status_bar_rotate);
+        mSlotHeadset = resources.getString(com.android.internal.R.string.status_bar_headset);
+        mSlotDataSaver = resources.getString(com.android.internal.R.string.status_bar_data_saver);
+        mSlotLocation = resources.getString(com.android.internal.R.string.status_bar_location);
+        mSlotMicrophone = resources.getString(com.android.internal.R.string.status_bar_microphone);
+        mSlotCamera = resources.getString(com.android.internal.R.string.status_bar_camera);
+        mSlotSensorsOff = resources.getString(com.android.internal.R.string.status_bar_sensors_off);
+        mSlotScreenRecord = resources.getString(
+                com.android.internal.R.string.status_bar_screen_record);
+        mSlotNfc = resources.getString(com.android.internal.R.string.status_bar_nfc);
+        mSlotFirewall = resources.getString(R.string.status_bar_firewall_slot);
+
+        mDisplayId = displayId;
+        mSharedPreferences = sharedPreferences;
+        mDateFormatUtil = dateFormatUtil;
+    }
+
+    /** Initialize the object after construction. */
+    public void init() {
+        // listen for broadcasts
+        IntentFilter filter = new IntentFilter();
+
+        filter.addAction(AudioManager.ACTION_HEADSET_PLUG);
+        filter.addAction(Intent.ACTION_SIM_STATE_CHANGED);
+        filter.addAction(TelecomManager.ACTION_CURRENT_TTY_MODE_CHANGED);
+        filter.addAction(Intent.ACTION_MANAGED_PROFILE_AVAILABLE);
+        filter.addAction(Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE);
+        filter.addAction(Intent.ACTION_PROFILE_REMOVED);
+        filter.addAction(Intent.ACTION_PROFILE_ACCESSIBLE);
+        filter.addAction(Intent.ACTION_PROFILE_INACCESSIBLE);
+        filter.addAction(NfcAdapter.ACTION_ADAPTER_STATE_CHANGED);
+        mBroadcastDispatcher.registerReceiverWithHandler(mIntentReceiver, filter, mHandler);
+        Observer<Integer> observer = ringer -> mHandler.post(this::updateVolumeZen);
+
+        mRingerModeTracker.getRingerMode().observeForever(observer);
+        mRingerModeTracker.getRingerModeInternal().observeForever(observer);
+
+        // listen for user / profile change.
+        mUserTracker.addCallback(mUserSwitchListener, mMainExecutor);
+
+        // TTY status
+        updateTTY();
+
+        // bluetooth status
+        updateBluetooth();
+
+        // Alarm clock
+        mIconController.setIcon(mSlotAlarmClock, R.drawable.stat_sys_alarm, null);
+        mIconController.setIconVisibility(mSlotAlarmClock, false);
+
+        // zen
+        mIconController.setIcon(mSlotZen, R.drawable.stat_sys_dnd, null);
+        mIconController.setIconVisibility(mSlotZen, false);
+
+        // vibrate
+        mIconController.setIcon(mSlotVibrate, R.drawable.stat_sys_ringer_vibrate,
+                mResources.getString(R.string.accessibility_ringer_vibrate));
+        mIconController.setIconVisibility(mSlotVibrate, false);
+        // mute
+        mIconController.setIcon(mSlotMute, R.drawable.stat_sys_ringer_silent,
+                mResources.getString(R.string.accessibility_ringer_silent));
+        mIconController.setIconVisibility(mSlotMute, false);
+        updateVolumeZen();
+
+        // connected display
+        mIconController.setIcon(mSlotConnectedDisplay, R.drawable.stat_sys_connected_display,
+                mResources.getString(R.string.connected_display_icon_desc));
+        mIconController.setIconVisibility(mSlotConnectedDisplay, false);
+
+        // hotspot
+        mIconController.setIcon(mSlotHotspot, R.drawable.stat_sys_hotspot,
+                mResources.getString(R.string.accessibility_status_bar_hotspot));
+        mIconController.setIconVisibility(mSlotHotspot, mHotspot.isHotspotEnabled());
+
+        // profile
+        updateProfileIcon();
+
+        // data saver
+        mIconController.setIcon(mSlotDataSaver, R.drawable.stat_sys_data_saver,
+                mResources.getString(R.string.accessibility_data_saver_on));
+        mIconController.setIconVisibility(mSlotDataSaver, false);
+
+
+        // privacy items
+        String microphoneString = mResources.getString(PrivacyType.TYPE_MICROPHONE.getNameId());
+        String microphoneDesc = mResources.getString(
+                R.string.ongoing_privacy_chip_content_multiple_apps, microphoneString);
+        mIconController.setIcon(mSlotMicrophone, PrivacyType.TYPE_MICROPHONE.getIconId(),
+                microphoneDesc);
+        mIconController.setIconVisibility(mSlotMicrophone, false);
+
+        String cameraString = mResources.getString(PrivacyType.TYPE_CAMERA.getNameId());
+        String cameraDesc = mResources.getString(
+                R.string.ongoing_privacy_chip_content_multiple_apps, cameraString);
+        mIconController.setIcon(mSlotCamera, PrivacyType.TYPE_CAMERA.getIconId(),
+                cameraDesc);
+        mIconController.setIconVisibility(mSlotCamera, false);
+
+        mIconController.setIcon(mSlotLocation, LOCATION_STATUS_ICON_ID,
+                mResources.getString(R.string.accessibility_location_active));
+        mIconController.setIconVisibility(mSlotLocation, false);
+
+        // sensors off
+        mIconController.setIcon(mSlotSensorsOff, R.drawable.stat_sys_sensors_off,
+                mResources.getString(R.string.accessibility_sensors_off_active));
+        mIconController.setIconVisibility(mSlotSensorsOff,
+                mSensorPrivacyController.isSensorPrivacyEnabled());
+
+        // screen record
+        mIconController.setIcon(mSlotScreenRecord, R.drawable.stat_sys_screen_record, null);
+        mIconController.setIconVisibility(mSlotScreenRecord, false);
+
+        mIconController.setIcon(mSlotTurboDsda, R.drawable.ic_turbo_dsda, null);
+        mIconController.setIconVisibility(mSlotTurboDsda, false);
+
+        mIconController.setIcon(mSlotNfc, R.drawable.stat_sys_nfc,
+                mResources.getString(R.string.status_bar_nfc));
+
+        mIconController.setIconVisibility(mSlotNfc, false);
+        updateNfc();
+        // firewall
+        mIconController.setIcon(mSlotFirewall, R.drawable.stat_sys_firewall, null);
+        mIconController.setIconVisibility(mSlotFirewall, mFirewallVisible);
+
+        mRotationLockController.addCallback(this);
+        mBluetooth.addCallback(this);
+        mProvisionedController.addCallback(this);
+        mCurrentUserSetup = mProvisionedController.isCurrentUserSetup();
+        // Note that we're not fully replacing ZenModeController with ZenModeInteractor yet, so
+        // we listen for the extra event here but still add the ZMC callback.
+        mJavaAdapter.alwaysCollectFlow(mZenModeInteractor.getMainActiveMode(),
+                this::onMainActiveModeChanged);
+        mZenController.addCallback(mZenControllerCallback);
+        mHotspot.addCallback(mHotspotCallback);
+        mNextAlarmController.addCallback(mNextAlarmCallback);
+        mDataSaver.addCallback(this);
+        mKeyguardStateController.addCallback(this);
+        mPrivacyItemController.addCallback(this);
+        mSensorPrivacyController.addCallback(mSensorPrivacyListener);
+        mLocationController.addCallback(this);
+        mJavaAdapter.alwaysCollectFlow(mConnectedDisplayInteractor.getConnectedDisplayState(),
+                this::onConnectedDisplayAvailabilityChanged);
+        if (mFiveGServiceClient != null) {
+            mFiveGServiceClient.registerAuxiliaryListener(mAuxiliaryListener);
+        }
+
+
+        mCommandQueue.addCallback(this);
+
+        // Get initial user setup state
+        onUserSetupChanged();
+    }
+
+    private String getManagedProfileAccessibilityString() {
+        return mDevicePolicyManager.getResources().getString(
+                STATUS_BAR_WORK_ICON_ACCESSIBILITY,
+                () -> mResources.getString(R.string.accessibility_managed_profile));
+    }
+
+    private void onMainActiveModeChanged(@Nullable ZenModeInfo mainActiveMode) {
+        boolean visible = mainActiveMode != null;
+        if (visible) {
+            // Shape=FIXED_SPACE because mode icons can be from 3P packages and may not be square;
+            // we don't want to allow apps to set incredibly wide icons and take up too much space
+            // in the status bar.
+            Icon.Loaded icon = mainActiveMode.getIcon();
+            mIconController.setResourceIcon(mSlotZen,
+                    icon.getPackageName(),
+                    icon.getResId(),
+                    icon.getDrawable(),
+                    mResources.getString(R.string.active_mode_content_description,
+                            mainActiveMode.getName()),
+                    StatusBarIcon.Shape.FIXED_SPACE);
+        }
+        if (visible != mZenVisible) {
+            mIconController.setIconVisibility(mSlotZen, visible);
+            mZenVisible = visible;
+        }
+    }
+
+    // TODO: b/308591859 - Should be removed and use the ZenModeInteractor only.
+    private final ZenModeController.Callback mZenControllerCallback =
+            new ZenModeController.Callback() {
+                @Override
+                public void onZenChanged(int zen) {
+                    updateVolumeZen();
+                }
+
+                @Override
+                public void onConsolidatedPolicyChanged(NotificationManager.Policy policy) {
+                    updateVolumeZen();
+                }
+            };
+
+    private void updateAlarm() {
+        final AlarmClockInfo alarm = mAlarmManager.getNextAlarmClock(mUserTracker.getUserId());
+        final boolean hasAlarm = alarm != null && alarm.getTriggerTime() > 0;
+        int zen = mZenController.getZen();
+        final boolean zenNone = zen == Global.ZEN_MODE_NO_INTERRUPTIONS;
+        mIconController.setIcon(mSlotAlarmClock, zenNone ? R.drawable.stat_sys_alarm_dim
+                : R.drawable.stat_sys_alarm, buildAlarmContentDescription());
+        mIconController.setIconVisibility(mSlotAlarmClock, mCurrentUserSetup && hasAlarm);
+    }
+
+    private String buildAlarmContentDescription() {
+        if (mNextAlarm == null) {
+            return mResources.getString(R.string.status_bar_alarm);
+        }
+
+        String skeleton = mDateFormatUtil.is24HourFormat() ? "EHm" : "Ehma";
+        String pattern = DateFormat.getBestDateTimePattern(Locale.getDefault(), skeleton);
+        String dateString = DateFormat.format(pattern, mNextAlarm.getTriggerTime()).toString();
+
+        return mResources.getString(R.string.accessibility_quick_settings_alarm, dateString);
+    }
+
+    private NfcAdapter getAdapter() {
+        if (mAdapter == null) {
+            try {
+                mAdapter = NfcAdapter.getDefaultAdapter(mContext);
+            } catch (UnsupportedOperationException e) {
+                mAdapter = null;
+            }
+        }
+        return mAdapter;
+    }
+
+    private final void updateNfc() {
+        mIconController.setIconVisibility(mSlotNfc, getAdapter() != null && getAdapter().isEnabled());
+    }
+
+    private void updateVolumeZen() {
+        int zen = mZenController.getZen();
+        updateRingerAndAlarmIcons(zen);
+    }
+
+    private void updateRingerAndAlarmIcons(int zen) {
+        boolean vibrateVisible = false;
+        boolean muteVisible = false;
+
+        NotificationManager.Policy consolidatedPolicy = mZenController.getConsolidatedPolicy();
+        if (!ZenModeConfig.isZenOverridingRinger(zen, consolidatedPolicy)) {
+            final Integer ringerModeInternal =
+                    mRingerModeTracker.getRingerModeInternal().getValue();
+            if (ringerModeInternal != null) {
+                if (ringerModeInternal == AudioManager.RINGER_MODE_VIBRATE) {
+                    vibrateVisible = true;
+                } else if (ringerModeInternal == AudioManager.RINGER_MODE_SILENT) {
+                    muteVisible = true;
+                }
+            }
+        }
+
+        if (vibrateVisible != mVibrateVisible) {
+            mIconController.setIconVisibility(mSlotVibrate, vibrateVisible);
+            mVibrateVisible = vibrateVisible;
+        }
+
+        if (muteVisible != mMuteVisible) {
+            mIconController.setIconVisibility(mSlotMute, muteVisible);
+            mMuteVisible = muteVisible;
+        }
+
+        updateAlarm();
+    }
+
+    @Override
+    public void onBluetoothDevicesChanged() {
+        updateBluetooth();
+    }
+
+    @Override
+    public void onBluetoothStateChange(boolean enabled) {
+        updateBluetooth();
+    }
+
+    private final void updateBluetooth() {
+        String contentDescription =
+                mResources.getString(R.string.accessibility_quick_settings_bluetooth_on);
+        boolean bluetoothVisible = false;
+        int batteryLevel = -1;
+        if (mBluetooth != null && mBluetooth.isBluetoothConnected()) {
+            bluetoothVisible = mBluetooth.isBluetoothEnabled();
+            batteryLevel = mBluetooth.getBatteryLevel();
+            contentDescription = mResources.getString(
+                    R.string.accessibility_bluetooth_connected);
+        }
+
+        mIconController.setBluetoothIcon(mSlotBluetooth,
+                new BluetoothIconState(bluetoothVisible, batteryLevel, contentDescription));
+    }
+
+    private final void updateTTY() {
+        if (mTelecomManager == null) {
+            updateTTY(TelecomManager.TTY_MODE_OFF);
+        } else {
+            updateTTY(mTelecomManager.getCurrentTtyMode());
+        }
+    }
+
+    private final void updateTTY(int currentTtyMode) {
+        boolean enabled = currentTtyMode != TelecomManager.TTY_MODE_OFF;
+
+        if (DEBUG) Log.v(TAG, "updateTTY: enabled: " + enabled);
+
+        if (enabled) {
+            // TTY is on
+            if (DEBUG) Log.v(TAG, "updateTTY: set TTY on");
+            mIconController.setIcon(mSlotTty, R.drawable.stat_sys_tty_mode,
+                    mResources.getString(R.string.accessibility_tty_enabled));
+            mIconController.setIconVisibility(mSlotTty, true);
+        } else {
+            // TTY is off
+            if (DEBUG) Log.v(TAG, "updateTTY: set TTY off");
+            mIconController.setIconVisibility(mSlotTty, false);
+        }
+    }
+
+    private void updateProfileIcon() {
+        // getLastResumedActivityUserId needs to acquire the AM lock, which may be contended in
+        // some cases. Since it doesn't really matter here whether it's updated in this frame
+        // or in the next one, we call this method from our UI offload thread.
+        mUiBgExecutor.execute(() -> {
+            try {
+                final int userId = ActivityTaskManager.getService().getLastResumedActivityUserId();
+                final int iconResId = mUserManager.isProfile(userId) ?
+                        mUserManager.getUserStatusBarIconResId(userId) : Resources.ID_NULL;
+                mMainExecutor.execute(() -> {
+                    final boolean showIcon;
+                    if (iconResId != Resources.ID_NULL && (!mKeyguardStateController.isShowing()
+                            || mKeyguardStateController.isOccluded())) {
+                        String accessibilityString = "";
+                        try {
+                            accessibilityString =
+                                    mUserManager.getProfileAccessibilityString(userId);
+                        } catch (Resources.NotFoundException nfe) {
+                            Log.e(TAG, "Accessibility string not found for userId:"
+                                    + userId);
+                        }
+                        showIcon = true;
+                        mIconController.setIcon(mSlotManagedProfile,
+                                iconResId,
+                                accessibilityString);
+                    } else {
+                        showIcon = false;
+                    }
+                    if (mProfileIconVisible != showIcon) {
+                        mIconController.setIconVisibility(mSlotManagedProfile, showIcon);
+                        mProfileIconVisible = showIcon;
+                    }
+                });
+            } catch (RemoteException e) {
+                Log.w(TAG, "updateProfileIcon: ", e);
+            }
+        });
+    }
+
+    private void registerBlockedStatusChangedCallbackForLastResumedActivityUid() {
+        mUiBgExecutor.execute(() -> {
+            try {
+                final int uid = ActivityTaskManager.getService().getLastResumedActivityUid();
+                if (mLastResumedActivityUid != uid) {
+                    mLastResumedActivityUid = uid;
+                    try {
+                        mConnectivityManager.unregisterNetworkCallback(mNetworkCallback);
+                    } catch (IllegalArgumentException e) {
+                        // Ignore
+                    }
+                    mConnectivityManager.registerDefaultNetworkCallbackForUid(uid, mNetworkCallback,
+                            mHandler);
+                }
+            } catch (RemoteException e) {
+                Log.w(TAG, "registerBlockedStatusChangedCallbackForLastResumedActivityUid", e);
+            }
+        });
+    }
+
+    private final ConnectivityManager.NetworkCallback mNetworkCallback =
+            new ConnectivityManager.NetworkCallback() {
+
+                @Override
+                public void onBlockedStatusChanged(@NonNull Network network, int blocked) {
+                    mHandler.post(() -> {
+                        registerBlockedStatusChangedCallbackForLastResumedActivityUid();
+                        mUiBgExecutor.execute(() -> {
+                            try {
+                                final int uid = ActivityTaskManager.getService()
+                                        .getLastResumedActivityUid();
+                                if (uid != Process.INVALID_UID) {
+                                    boolean requestsInternet = false;
+                                    PackageManager pm = mContext.getPackageManager();
+                                    String[] packages = pm.getPackagesForUid(uid);
+                                    if (packages != null) {
+                                        for (String pkg : packages) {
+                                            try {
+                                                PackageInfo pi = pm.getPackageInfo(
+                                                        pkg, PackageManager.GET_PERMISSIONS);
+                                                if (pi != null
+                                                        && pi.requestedPermissions != null) {
+                                                    for (String permission :
+                                                            pi.requestedPermissions) {
+                                                        if (Manifest.permission.INTERNET
+                                                                .equals(permission)) {
+                                                            requestsInternet = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            } catch (PackageManager.NameNotFoundException e) {
+                                                // Ignore
+                                            }
+                                            if (requestsInternet) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    final boolean finalRequestsInternet = requestsInternet;
+                                    mMainExecutor.execute(() -> {
+                                        boolean isLauncher = false;
+                                        List<ResolveInfo> homeActivities = mContext
+                                                .getPackageManager().queryIntentActivitiesAsUser(
+                                                        new Intent(Intent.ACTION_MAIN)
+                                                                .addCategory(Intent.CATEGORY_HOME)
+                                                                .addCategory(
+                                                                        Intent.CATEGORY_DEFAULT),
+                                                        PackageManager.ResolveInfoFlags.of(0),
+                                                        UserHandle.getUserId(uid));
+                                        for (ResolveInfo homeActivity : homeActivities) {
+                                            int homeUid =
+                                                    homeActivity.activityInfo.applicationInfo.uid;
+                                            if (uid == homeUid) {
+                                                isLauncher = true;
+                                                break;
+                                            }
+                                        }
+                                        final boolean finalIsLauncher = isLauncher;
+                                        final boolean showIcon;
+                                        if (!finalIsLauncher
+                                                && finalRequestsInternet
+                                                && blocked
+                                                != ConnectivityManager.BLOCKED_REASON_NONE
+                                                && (!mKeyguardStateController.isShowing()
+                                                || mKeyguardStateController.isOccluded())) {
+                                            showIcon = true;
+                                            mIconController.setIcon(mSlotFirewall,
+                                                    R.drawable.stat_sys_firewall, null);
+                                        } else {
+                                            showIcon = false;
+                                        }
+                                        if (mFirewallVisible != showIcon) {
+                                            mIconController.setIconVisibility(mSlotFirewall,
+                                                    showIcon);
+                                            mFirewallVisible = showIcon;
+                                        }
+                                    });
+                                }
+                            } catch (RemoteException e) {
+                                Log.w(TAG, "onBlockedStatusChanged", e);
+                            }
+                        });
+                    });
+                }
+            };
+
+    private final UserTracker.Callback mUserSwitchListener =
+            new UserTracker.Callback() {
+                @Override
+                public void onUserChanging(int newUser, Context userContext) {
+                    mHandler.post(() -> mUserInfoController.reloadUserInfo());
+                }
+
+                @Override
+                public void onUserChanged(int newUser, Context userContext) {
+                    mHandler.post(() -> {
+                        updateAlarm();
+                        updateProfileIcon();
+                        onUserSetupChanged();
+                    });
+                }
+            };
+
+    private final HotspotController.Callback mHotspotCallback = new HotspotController.Callback() {
+        @Override
+        public void onHotspotChanged(boolean enabled, int numDevices) {
+// QTI_BEGIN: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+            mIconController.setIconVisibility(mSlotHotspot, enabled);
+        }
+        @Override
+        public void onHotspotChanged(boolean enabled, int numDevices, int standard) {
+            updateHotspotIcon(standard);
+// QTI_END: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+            mIconController.setIconVisibility(mSlotHotspot, enabled);
+        }
+    };
+
+    private final NextAlarmController.NextAlarmChangeCallback mNextAlarmCallback =
+            new NextAlarmController.NextAlarmChangeCallback() {
+                @Override
+                public void onNextAlarmChanged(AlarmClockInfo nextAlarm) {
+                    mNextAlarm = nextAlarm;
+                    updateAlarm();
+                }
+            };
+
+    private final SensorPrivacyController.OnSensorPrivacyChangedListener mSensorPrivacyListener =
+            new SensorPrivacyController.OnSensorPrivacyChangedListener() {
+                @Override
+                public void onSensorPrivacyChanged(boolean enabled) {
+                    mHandler.post(() -> {
+                        mIconController.setIconVisibility(mSlotSensorsOff, enabled);
+                    });
+                }
+            };
+
+    @Override
+    public void appTransitionStarting(int displayId, long startTime, long duration,
+            boolean forced) {
+        if (mDisplayId == displayId) {
+            updateProfileIcon();
+            registerBlockedStatusChangedCallbackForLastResumedActivityUid();
+        }
+    }
+
+    @Override
+    public void appTransitionFinished(int displayId) {
+        if (mDisplayId == displayId) {
+            updateProfileIcon();
+            registerBlockedStatusChangedCallbackForLastResumedActivityUid();
+        }
+    }
+
+    @Override
+    public void onKeyguardShowingChanged() {
+        updateProfileIcon();
+        registerBlockedStatusChangedCallbackForLastResumedActivityUid();
+    }
+
+    @Override
+    public void onUserSetupChanged() {
+        boolean userSetup = mProvisionedController.isCurrentUserSetup();
+        if (mCurrentUserSetup == userSetup) return;
+        mCurrentUserSetup = userSetup;
+        updateAlarm();
+    }
+
+    @Override
+    public void onRotationLockStateChanged(boolean rotationLocked, boolean affordanceVisible) {
+        boolean portrait = RotationLockTile.isCurrentOrientationLockPortrait(
+                mRotationLockController, mResources);
+        if (rotationLocked) {
+            if (portrait) {
+                mIconController.setIcon(mSlotRotate, R.drawable.stat_sys_rotate_portrait,
+                        mResources.getString(R.string.accessibility_rotation_lock_on_portrait));
+            } else {
+                mIconController.setIcon(mSlotRotate, R.drawable.stat_sys_rotate_landscape,
+                        mResources.getString(R.string.accessibility_rotation_lock_on_landscape));
+            }
+            mIconController.setIconVisibility(mSlotRotate, true);
+        } else {
+            mIconController.setIconVisibility(mSlotRotate, false);
+        }
+    }
+
+    private void updateHeadsetPlug(Intent intent) {
+        boolean connected = intent.getIntExtra("state", 0) != 0;
+        boolean hasMic = intent.getIntExtra("microphone", 0) != 0;
+        if (connected) {
+            String contentDescription = mResources.getString(hasMic
+                    ? R.string.accessibility_status_bar_headset
+                    : R.string.accessibility_status_bar_headphones);
+            mIconController.setIcon(mSlotHeadset, hasMic ? R.drawable.stat_sys_headset_mic
+                    : R.drawable.stat_sys_headset, contentDescription);
+            mIconController.setIconVisibility(mSlotHeadset, true);
+        } else {
+            mIconController.setIconVisibility(mSlotHeadset, false);
+        }
+    }
+
+    @Override
+    public void onDataSaverChanged(boolean isDataSaving) {
+        mIconController.setIconVisibility(mSlotDataSaver, isDataSaving);
+    }
+
+    @Override  // PrivacyItemController.Callback
+    public void onPrivacyItemsChanged(List<PrivacyItem> privacyItems) {
+        updatePrivacyItems(privacyItems);
+    }
+
+    private void updatePrivacyItems(List<PrivacyItem> items) {
+        boolean showCamera = false;
+        boolean showMicrophone = false;
+        boolean showLocation = false;
+        for (PrivacyItem item : items) {
+            if (item == null /* b/124234367 */) {
+                Log.e(TAG, "updatePrivacyItems - null item found");
+                StringWriter out = new StringWriter();
+                mPrivacyItemController.dump(new PrintWriter(out), null);
+                // Throw so we can look into this
+                throw new NullPointerException(out.toString());
+            }
+            switch (item.getPrivacyType()) {
+                case TYPE_CAMERA:
+                    showCamera = true;
+                    break;
+                case TYPE_LOCATION:
+                    showLocation = true;
+                    break;
+                case TYPE_MICROPHONE:
+                    showMicrophone = true;
+                    break;
+            }
+        }
+
+        // Disabling for now, but keeping the log
+        /*
+        mIconController.setIconVisibility(mSlotCamera, showCamera);
+        mIconController.setIconVisibility(mSlotMicrophone, showMicrophone);
+        if (mPrivacyItemController.getLocationAvailable()) {
+            mIconController.setIconVisibility(mSlotLocation, showLocation);
+        }
+         */
+        mPrivacyLogger.logStatusBarIconsVisible(showCamera, showMicrophone,  showLocation);
+    }
+
+    @Override
+    public void onLocationActiveChanged(boolean active) {
+        if (!mPrivacyItemController.getLocationAvailable()) {
+            updateLocationFromController();
+        }
+    }
+
+    // Updates the status view based on the current state of location requests.
+    private void updateLocationFromController() {
+        if (mLocationController.isLocationActive()) {
+            mIconController.setIconVisibility(mSlotLocation, true);
+        } else {
+            mIconController.setIconVisibility(mSlotLocation, false);
+        }
+    }
+
+    private BroadcastReceiver mIntentReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            switch (action) {
+                case Intent.ACTION_SIM_STATE_CHANGED:
+                    // Avoid rebroadcast because SysUI is direct boot aware.
+                    if (intent.getBooleanExtra(Intent.EXTRA_REBROADCAST_ON_UNLOCK, false)) {
+                        break;
+                    }
+                    break;
+                case TelecomManager.ACTION_CURRENT_TTY_MODE_CHANGED:
+                    updateTTY(intent.getIntExtra(TelecomManager.EXTRA_CURRENT_TTY_MODE,
+                            TelecomManager.TTY_MODE_OFF));
+                    break;
+                case Intent.ACTION_MANAGED_PROFILE_AVAILABLE:
+                case Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE:
+                case Intent.ACTION_PROFILE_REMOVED:
+                case Intent.ACTION_PROFILE_ACCESSIBLE:
+                case Intent.ACTION_PROFILE_INACCESSIBLE:
+                    updateProfileIcon();
+                    break;
+                case AudioManager.ACTION_HEADSET_PLUG:
+                    updateHeadsetPlug(intent);
+                    break;
+                case NfcAdapter.ACTION_ADAPTER_STATE_CHANGED:
+                    updateNfc();
+                    break;
+            }
+        }
+    };
+
+// QTI_BEGIN: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+    private void updateHotspotIcon(int standard) {
+        if (standard == ScanResult.WIFI_STANDARD_11AX) {
+// QTI_END: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+            mIconController.setIcon(mSlotHotspot, R.drawable.stat_sys_wifi_6_hotspot,
+                mResources.getString(R.string.accessibility_status_bar_hotspot));
+// QTI_BEGIN: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+        } else if (standard == ScanResult.WIFI_STANDARD_11AC) {
+// QTI_END: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+            mIconController.setIcon(mSlotHotspot, R.drawable.stat_sys_wifi_5_hotspot,
+                mResources.getString(R.string.accessibility_status_bar_hotspot));
+// QTI_BEGIN: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+        } else if (standard == ScanResult.WIFI_STANDARD_11N) {
+// QTI_END: 2020-04-22: WLAN: wifi: refactor Wi-Fi generation UI enhancements
+            mIconController.setIcon(mSlotHotspot, R.drawable.stat_sys_wifi_4_hotspot,
+                mResources.getString(R.string.accessibility_status_bar_hotspot));
+        } else {
+            mIconController.setIcon(mSlotHotspot, R.drawable.stat_sys_hotspot,
+                mResources.getString(R.string.accessibility_status_bar_hotspot));
+        }
+    }
+
+    private void onConnectedDisplayAvailabilityChanged(ConnectedDisplayInteractor.State state) {
+        boolean visible = state != ConnectedDisplayInteractor.State.DISCONNECTED;
+
+        if (DEBUG) {
+            Log.d(TAG, "connected_display: " + (visible ? "showing" : "hiding") + " icon");
+        }
+
+        mIconController.setIconVisibility(mSlotConnectedDisplay, visible);
+    }
+
+    private final FiveGServiceClient.AuxiliaryListener mAuxiliaryListener =
+            new FiveGServiceClient.AuxiliaryListener() {
+        @Override
+        public void onAuxiliaryRadioIconInfoChange(AuxiliaryRadioIconInfo auxIconInfo) {
+            mHandler.post(() -> {
+                Log.d(TAG, "onAuxiliaryRadioIconInfoChange: " + auxIconInfo.getDsdaCategory());
+                mIconController.setIconVisibility(mSlotTurboDsda,
+                    auxIconInfo.getDsdaCategory() == AuxiliaryRadioIconInfo.DSDA_CATEGORY_TURBO);
+                }
+            );
+        }
+    };
+
+    public static class BluetoothIconState {
+        public boolean visible;
+        public int batteryLevel;
+        public String contentDescription;
+
+        public BluetoothIconState(boolean visible, int batteryLevel, String contentDescription) {
+            this.visible = visible;
+            this.batteryLevel = batteryLevel;
+            this.contentDescription = contentDescription;
+        }
+
+        @Override
+        public String toString() {
+            return "BluetoothIconState(visible=" + visible + " batteryLevel=" + batteryLevel + ")";
+        }
+    }
+}

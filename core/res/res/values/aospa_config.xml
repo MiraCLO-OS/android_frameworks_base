@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Copyright 2023 Paranoid Android
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+-->
+<resources>
+
+    <!-- Defines the sysfs attribute path used by the device
+         to enable/disable DC dimming. -->
+    <string name="config_deviceDcDimmingSysfsNode"></string>
+
+    <!-- Defines the value used by the device sysfs node
+         to enable DC dimming -->
+    <string name="config_deviceDcDimmingEnableValue">1</string>
+
+    <!-- Defines the value used by the device sysfs node
+         to disable DC dimming -->
+    <string name="config_deviceDcDimmingDisableValue">0</string>
+
+    <!-- The list of components which should be automatically disabled for a specific device.
+         Note: this MUST not be used to randomly disable components, ask for approval first! -->
+    <string-array name="config_deviceDisabledComponents" translatable="false">
+    </string-array>
+
+    <!-- The list of components which should be automatically disabled for all devices. -->
+    <string-array name="config_globallyDisabledComponents" translatable="false">
+    </string-array>
+
+    <!-- The list of components which should be forced to be enabled. -->
+    <string-array name="config_forceEnabledComponents" translatable="false">
+    </string-array>
+
+    <!-- Paths to the libraries that contain device specific key handlers -->
+    <string-array name="config_deviceKeyHandlerLibs" translatable="false">
+    </string-array>
+
+    <!-- Names of the key handler classes -->
+    <string-array name="config_deviceKeyHandlerClasses" translatable="false">
+    </string-array>
+
+    <!-- Pocket Lock -->
+    <bool name="config_pocketModeSupported">true</bool>
+    <bool name="config_pocketModeLightSensorSupported">true</bool>
+
+    <!-- Defines custom OEM sensor for pocket detection. -->
+    <string name="config_pocketJudgeVendorSensorName" translatable="false"></string>
+    <item name="config_pocketJudgeVendorSensorValue" format="float" type="dimen">1.0</item>
+
+    <!-- Defines the sysfs attribute path used by pocket bridge
+         to communicate pocket state to the pocket judge kernel driver. -->
+    <string name="config_pocketBridgeSysfsInpocket" translatable="false"></string>
+
+    <!-- Whether charging control should be enabled by default -->
+    <bool name="config_chargingControlEnabled">false</bool>
+    <!-- Default charging control mode.
+         This integer should be set to:
+         1 - auto - Use the alarm to calculate the time range when to activate charging control
+         2 - custom - Use time range when the device is usually charging for hours
+         3 - limit - Just limit charging -->
+    <integer name="config_defaultChargingControlMode">1</integer>
+    <!-- Default time when charging control is activated.
+         Represented as seconds from midnight (e.g. 79200 == 10pm). -->
+    <integer name="config_defaultChargingControlStartTime">79200</integer>
+    <!-- Default time when battery will be fully charged.
+         Represented as seconds from midnight (e.g. 21600 == 6am). -->
+    <integer name="config_defaultChargingControlTargetTime">21600</integer>
+    <!-- Default charging limit. -->
+    <integer name="config_defaultChargingControlLimit">80</integer>
+    <!-- Considering the fact that the system might have an incorrect estimation of the time to
+         full. Set a time margin to make the device fully charged before the target time arrives.
+         The unit is minutes and the default value is 30 minutes. If you find that it is not enough
+         to make the device to be fully charged at the target time, increase the value
+    -->
+    <integer name="config_chargingControlTimeMargin">30</integer>
+    <!-- For a device that cannot bypass battery when charging stops (that is, the battery current
+         is 0mA when charging stops), the battery will gradually discharge. So we need to make it
+         recharge when the battery level is lower than a threshold. Set this so that the device
+         will be charged between (limit - val) and limit. -->
+    <integer name="config_chargingControlBatteryRechargeMargin">10</integer>
+    <!-- Some devices might require always setting the toggle instead of set based on current toggle
+    value. If this is the case, set this config to true to let the toggle provider always set
+    charging enabled status regardless of the current status. -->
+    <bool name="config_chargingControlToggleSetAlways">false</bool>
+
+    <!-- Fast charge -->
+    <string-array name="charging_speed_entries" translatable="false">
+        <item>@string/charging_speed_slow</item>
+        <item>@string/charging_speed_fast</item>
+        <item>@string/charging_speed_super_fast</item>
+    </string-array>
+
+    <string-array name="charging_speed_values" translatable="false">
+        <item>1</item> <!-- FastChargeMode.NONE -->
+        <item>2</item> <!-- FastChargeMode.FAST_CHARGE -->
+        <item>4</item> <!-- FastChargeMode.SUPER_FAST_CHARGE -->
+    </string-array>
+
+    <!-- Key codes of gestures. If the gesture is not supported set it to 0. -->
+    <integer name="config_doubleTapKeyCode">0</integer>
+    <integer name="config_singleTapKeyCode">0</integer>
+    <integer name="config_drawVKeyCode">0</integer>
+    <integer name="config_drawInverseVKeyCode">0</integer>
+    <integer name="config_drawOKeyCode">0</integer>
+    <integer name="config_drawMKeyCode">0</integer>
+    <integer name="config_drawWKeyCode">0</integer>
+    <integer name="config_drawSKeyCode">0</integer>
+    <integer name="config_drawArrowLeftKeyCode">0</integer>
+    <integer name="config_drawArrowRightKeyCode">0</integer>
+    <integer name="config_oneFingerSwipeUpKeyCode">0</integer>
+    <integer name="config_oneFingerSwipeRightKeyCode">0</integer>
+    <integer name="config_oneFingerSwipeDownKeyCode">0</integer>
+    <integer name="config_oneFingerSwipeLeftKeyCode">0</integer>
+    <integer name="config_twoFingerSwipeKeyCode">0</integer>
+
+    <!-- Default settings for gestures
+            0 - Disabled
+            1 - Wake device
+            2 - Toggle flashlight
+            3 - Toggle airplane mode
+            4 - Play/Pause music
+            5 - Next music
+            6 - Previous music
+            7 - Open camera
+            8 - Open dialer -->
+    <integer name="config_doubleTapDefault">0</integer>
+    <integer name="config_singleTapDefault">0</integer>
+    <integer name="config_drawVDefault">0</integer>
+    <integer name="config_drawInverseVDefault">0</integer>
+    <integer name="config_drawODefault">0</integer>
+    <integer name="config_drawMDefault">0</integer>
+    <integer name="config_drawWDefault">0</integer>
+    <integer name="config_drawSDefault">0</integer>
+    <integer name="config_drawArrowLeftDefault">0</integer>
+    <integer name="config_drawArrowRightDefault">0</integer>
+    <integer name="config_oneFingerSwipeUpDefault">0</integer>
+    <integer name="config_oneFingerSwipeRightDefault">0</integer>
+    <integer name="config_oneFingerSwipeDownDefault">0</integer>
+    <integer name="config_oneFingerSwipeLeftDefault">0</integer>
+    <integer name="config_twoFingerSwipeDefault">0</integer>
+
+    <!-- KeyHandler to intercept inputs on screen off. -->
+    <bool name="config_enableKeyHandler">false</bool>
+
+    <!-- Whether to use Richtap vibration -->
+    <bool name="config_usesRichtapVibration">false</bool>
+
+   <!-- Defines the actions shown in advanced reboot submenu -->
+   <string-array name="config_restartActionsList">
+       <item>restart</item>
+       <item>restart_recovery</item>
+       <item>restart_bootloader</item>
+       <item>restart_fastboot</item>
+   </string-array>
+</resources>

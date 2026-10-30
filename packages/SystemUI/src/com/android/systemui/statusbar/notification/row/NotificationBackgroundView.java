@@ -143,7 +143,7 @@ public class NotificationBackgroundView extends View implements Dumpable,
         if (mBackground == null || mBackgroundBlurDrawable != null || mExpandAnimationRunning) {
             return false;
         }
-        if (!MiraCLOLiquidGlass.isEnabled(mContext)) {
+        if (!MiraCLOLiquidGlass.isEnabled(mContext, MiraCLOLiquidGlass.NOTIFICATIONS)) {
             return false;
         }
         ViewParent parent = getParent();

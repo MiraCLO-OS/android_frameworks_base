@@ -32,25 +32,42 @@ import java.util.Collections
 import java.util.WeakHashMap
 
 /**
- * One place that knows whether the MiraCLO Liquid Glass look is on (the same switch the
- * Liquid Glass QS uses), so notifications and the volume panel follow it without each of
- * them watching the setting. Main thread only.
+ * One place that knows where the MiraCLO Liquid Glass look is on. Settings > Display >
+ * Liquid Glass has a main switch ([KEY]) and one switch per place (on by default); a place
+ * is glass when both are on. Main thread only.
  */
 object MiraCLOLiquidGlass {
 
     const val KEY = "miraclo_liquid_glass"
 
+    const val QS = "miraclo_lg_qs"
+    const val NOTIFICATIONS = "miraclo_lg_notifications"
+    const val VOLUME = "miraclo_lg_volume"
+    const val POWER = "miraclo_lg_power"
+    const val ISLAND = "miraclo_lg_island"
+    const val ISLAND_PILLS = "miraclo_lg_island_pills"
+
+    @JvmField val PLACES = arrayOf(QS, NOTIFICATIONS, VOLUME, POWER, ISLAND, ISLAND_PILLS)
+
     @Volatile private var enabled = false
+    private val places = HashMap<String, Boolean>()
     private var appContext: Context? = null
     private val handler by lazy { Handler(Looper.getMainLooper()) }
     private val views: MutableSet<View> = Collections.newSetFromMap(WeakHashMap())
     private val listeners = ArrayList<(Boolean) -> Unit>()
 
-    /** Whether Liquid Glass is on. Starts watching the setting on first use. */
+    /** Whether the Liquid Glass main switch is on. Starts watching the settings on first use. */
     @JvmStatic
     fun isEnabled(context: Context): Boolean {
         ensureWatching(context)
         return enabled
+    }
+
+    /** Whether [place] (one of the place keys above) should be glass. */
+    @JvmStatic
+    fun isEnabled(context: Context, place: String): Boolean {
+        ensureWatching(context)
+        return enabled && places[place] != false
     }
 
     /** Redraws [view] whenever the setting changes, until [detach] or the view is gone. */
@@ -81,13 +98,14 @@ object MiraCLOLiquidGlass {
         val app = context.applicationContext ?: context
         appContext = app
         try {
-            app.contentResolver.registerContentObserver(
-                Settings.Secure.getUriFor(KEY), false,
+            val observer =
                 object : ContentObserver(handler) {
                     override fun onChange(selfChange: Boolean, uri: Uri?) = refresh()
-                },
-                UserHandle.USER_ALL,
-            )
+                }
+            for (key in listOf(KEY) + PLACES) {
+                app.contentResolver.registerContentObserver(
+                    Settings.Secure.getUriFor(key), false, observer, UserHandle.USER_ALL)
+            }
             app.registerReceiverAsUser(
                 object : BroadcastReceiver() {
                     override fun onReceive(c: Context, intent: Intent) = refresh()
@@ -98,21 +116,28 @@ object MiraCLOLiquidGlass {
         } catch (_: Exception) {
             // Without the observer the value is still read once below.
         }
-        enabled = read(app)
+        enabled = read(app, KEY, 0)
+        for (place in PLACES) places[place] = read(app, place, 1)
     }
 
-    private fun read(context: Context): Boolean =
+    private fun read(context: Context, key: String, def: Int): Boolean =
         try {
             Settings.Secure.getIntForUser(
-                context.contentResolver, KEY, 0, ActivityManager.getCurrentUser()) != 0
+                context.contentResolver, key, def, ActivityManager.getCurrentUser()) != 0
         } catch (_: Exception) {
-            false
+            def != 0
         }
 
     private fun refresh() {
         val context = appContext ?: return
-        val now = read(context)
-        if (now == enabled) return
+        val now = read(context, KEY, 0)
+        var changed = now != enabled
+        for (place in PLACES) {
+            val on = read(context, place, 1)
+            if (places[place] != on) changed = true
+            places[place] = on
+        }
+        if (!changed) return
         enabled = now
         for (view in views.toList()) view.invalidate()
         for (listener in listeners.toList()) {

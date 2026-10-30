@@ -189,6 +189,9 @@ constructor(
     // visible tasks are read again once that has finished.
     private val foregroundRecheck = Runnable { refreshForeground() }
     private val foregroundRecheckLate = Runnable { refreshForeground() }
+    // Some apps finish going to the background (or into their small window) after an animation
+    // longer than a second; one more look once it is surely over.
+    private val foregroundRecheckSettled = Runnable { refreshForeground() }
 
     private val settingsObserver =
         object : ContentObserver(mainHandler) {
@@ -204,6 +207,13 @@ constructor(
             override fun onTaskStackChanged() = onTasksChanged()
 
             override fun onActivityUnpinned() = onTasksChanged()
+
+            // YouTube's minimised player: the app moves into its small window, or back, without
+            // always changing the task stack, so these count as changes too.
+            override fun onActivityPinned(packageName: String, userId: Int, taskId: Int, stackId: Int) =
+                onTasksChanged()
+
+            override fun onTaskMovedToFront(taskId: Int) = onTasksChanged()
         }
 
     override fun start() {
@@ -331,7 +341,8 @@ constructor(
         config =
             MiraCLOIslandView.Config(
                 touchGlow = on(KEY_TOUCH_GLOW, 1),
-                glass = on(KEY_GLASS, 0),
+                glass = on(KEY_LIQUID_GLASS, 0) && on(KEY_LG_ISLAND, 1),
+                glassPills = on(KEY_LIQUID_GLASS, 0) && on(KEY_LG_ISLAND_PILLS, 1),
                 ambientGlow = on(KEY_AMBIENT_GLOW, 1),
                 haptics = on(KEY_HAPTICS, 1),
             )
@@ -344,8 +355,10 @@ constructor(
         refreshForeground()
         mainHandler.removeCallbacks(foregroundRecheck)
         mainHandler.removeCallbacks(foregroundRecheckLate)
+        mainHandler.removeCallbacks(foregroundRecheckSettled)
         mainHandler.postDelayed(foregroundRecheck, FOREGROUND_RECHECK_MS)
         mainHandler.postDelayed(foregroundRecheckLate, FOREGROUND_RECHECK_LATE_MS)
+        mainHandler.postDelayed(foregroundRecheckSettled, FOREGROUND_RECHECK_SETTLED_MS)
     }
 
     /** Reads the visible tasks off the main thread, then updates on the main thread. */
@@ -821,6 +834,7 @@ constructor(
         private const val LAUNCH_GRACE_MS = 1500L
         private const val FOREGROUND_RECHECK_MS = 400L
         private const val FOREGROUND_RECHECK_LATE_MS = 1000L
+        private const val FOREGROUND_RECHECK_SETTLED_MS = 2500L
         private const val PAUSED_TIMEOUT_MS = 10 * 60 * 1000L
         private const val WINDOW_HEIGHT_FRACTION = 0.62f
         private val DEFAULT_ACCENT = 0xFF34D399.toInt()
@@ -843,7 +857,10 @@ constructor(
         const val KEY_EARBUDS = "miraclo_island_earbuds"
         const val KEY_RINGER = "miraclo_island_ringer"
         const val KEY_LOW_BATTERY = "miraclo_island_low_battery"
-        const val KEY_GLASS = "miraclo_island_glass"
+        // Liquid Glass is set in Settings > Display > Liquid Glass: main switch + one per place.
+        const val KEY_LIQUID_GLASS = "miraclo_liquid_glass"
+        const val KEY_LG_ISLAND = "miraclo_lg_island"
+        const val KEY_LG_ISLAND_PILLS = "miraclo_lg_island_pills"
 
         private val ALL_KEYS =
             listOf(
@@ -864,7 +881,9 @@ constructor(
                 KEY_EARBUDS,
                 KEY_RINGER,
                 KEY_LOW_BATTERY,
-                KEY_GLASS,
+                KEY_LIQUID_GLASS,
+                KEY_LG_ISLAND,
+                KEY_LG_ISLAND_PILLS,
             )
     }
 }

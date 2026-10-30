@@ -116,6 +116,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         val haptics: Boolean = true,
         /** Liquid Glass cards: clearer glass with a bright edge instead of the frosted dark glass. */
         val glass: Boolean = false,
+        /** Liquid Glass pills and bubbles instead of the black pill. */
+        val glassPills: Boolean = false,
     )
 
     /**
@@ -773,8 +775,14 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
          * behind stays visible, with a bright specular edge (top-left and bottom-right) and a
          * soft inner light.
          */
+        /** Which look is applied now: pills and cards can each be Liquid Glass or not. */
+        private var liquidNow = false
+
+        private fun liquidFor(c: Float) = if (c < 0.5f) config.glassPills else config.glass
+
         private fun applyGlassStyle() {
-            val glass = config.glass
+            val glass = liquidFor(geo.c)
+            liquidNow = glass
             blur?.setBlurRadius(dp(if (glass) 14 else 36))
             blur?.setColor(if (glass) 0x4D10131C else 0x8C141519.toInt())
             if (width > 0) updateRimShaders(width, height)
@@ -788,14 +796,14 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
          * shape at the top-left of this view, so the gradients are scaled down onto it.
          */
         private fun fitGlassShaders(g: Geo) {
-            if (!config.glass || width <= 0 || height <= 0) return
+            if (!liquidNow || width <= 0 || height <= 0) return
             glassMatrix.setScale(g.w / width, g.h / height)
             cardRim.shader?.setLocalMatrix(glassMatrix)
             gloss.shader?.setLocalMatrix(glassMatrix)
         }
 
         private fun updateRimShaders(w: Int, h: Int) {
-            if (config.glass) {
+            if (liquidNow) {
                 gloss.shader = LinearGradient(0f, 0f, 0f, h * 0.5f, 0x38FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
                 cardRim.shader = LinearGradient(
                     0f, 0f, w.toFloat(), h.toFloat(),
@@ -999,7 +1007,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             aura.alpha = if (config.ambientGlow) smooth(g.c, 0.25f, 1f) * alpha else 0f
             aura.cardHeight = g.h
             // Liquid Glass: pills and bubbles are glass too; otherwise only cards are.
-            blur?.alpha = if (config.glass) 255 else (255 * g.c).toInt().coerceIn(0, 255)
+            blur?.alpha = if (config.glassPills) 255 else (255 * g.c).toInt().coerceIn(0, 255)
             invalidateOutline()
             invalidate()
         }
@@ -1033,7 +1041,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
         override fun onDraw(canvas: Canvas) {
             val g = geo
             clip.roundOut(clipInt)
-            val glassPill = config.glass
+            if (liquidFor(g.c) != liquidNow) applyGlassStyle()
+            val glassPill = config.glassPills
             if (g.c > 0.001f || glassPill) {
                 val surface = if (glassPill) 1f else g.c
                 fitGlassShaders(g)
@@ -1069,7 +1078,7 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
             }
             // Black skin: the pill / bubble body, fading into glass as it becomes a card. With
             // Liquid Glass there is no skin: pills are the same glass as the cards.
-            val skinA = if (config.glass) 0f else 1f - smooth(g.c, 0f, 0.6f)
+            val skinA = if (config.glassPills) 0f else 1f - smooth(g.c, 0f, 0.6f)
             if (skinA > 0f && g.h != shaderH) {
                 shaderH = g.h
                 skin.shader = LinearGradient(0f, 0f, 0f, g.h, 0xFF16171C.toInt(), Color.BLACK, Shader.TileMode.CLAMP)
@@ -1091,8 +1100,8 @@ class MiraCLOIslandView(context: Context, private val host: Host) : FrameLayout(
                 val i = pillRim.strokeWidth / 2f
                 canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, pillRim)
             }
-            if (g.c > 0f || config.glass) {
-                cardRim.alpha = if (config.glass) 255 else (255 * g.c).toInt().coerceIn(0, 255)
+            if (g.c > 0f || config.glassPills) {
+                cardRim.alpha = if (config.glassPills) 255 else (255 * g.c).toInt().coerceIn(0, 255)
                 val i = cardRim.strokeWidth / 2f
                 canvas.drawRoundRect(i, i, g.w - i, g.h - i, g.r, g.r, cardRim)
             }

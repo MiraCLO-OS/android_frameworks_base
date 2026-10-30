@@ -267,7 +267,8 @@ constructor(
                     Settings.Secure.QS_SHOW_AUTO_BRIGHTNESS,
                     Settings.System.QS_TILES_CIRCULAR,
                     MIRACLO_QS_STYLE,
-                    MIRACLO_LIQUID_GLASS -> readQsSettings()
+                    MIRACLO_LIQUID_GLASS,
+                    MIRACLO_LIQUID_GLASS_QS -> readQsSettings()
                 }
             }
         }
@@ -291,6 +292,9 @@ constructor(
             settingsObserver, UserHandle.USER_ALL)
         settingsResolver.registerContentObserver(
             Settings.Secure.getUriFor(MIRACLO_LIQUID_GLASS), false,
+            settingsObserver, UserHandle.USER_ALL)
+        settingsResolver.registerContentObserver(
+            Settings.Secure.getUriFor(MIRACLO_LIQUID_GLASS_QS), false,
             settingsObserver, UserHandle.USER_ALL)
         userTracker.addCallback(userChangedCallback) { mainHandler.post(it) }
         readQsSettings()
@@ -321,7 +325,9 @@ constructor(
         miracloQsStyle = Settings.Secure.getIntForUser(
             settingsResolver, MIRACLO_QS_STYLE, 0, userTracker.userId) != 0
         miracloLiquidGlass = Settings.Secure.getIntForUser(
-            settingsResolver, MIRACLO_LIQUID_GLASS, 0, userTracker.userId) != 0
+            settingsResolver, MIRACLO_LIQUID_GLASS, 0, userTracker.userId) != 0 &&
+            Settings.Secure.getIntForUser(
+                settingsResolver, MIRACLO_LIQUID_GLASS_QS, 1, userTracker.userId) != 0
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1781,3 +1787,4 @@ private const val MIRACLO_QS_STYLE = "miraclo_qs_style"
 
 /** MiraCLO: Settings.Secure key for Liquid Glass (Settings > Display), 0 = off, 1 = on. */
 private const val MIRACLO_LIQUID_GLASS = "miraclo_liquid_glass"
+private const val MIRACLO_LIQUID_GLASS_QS = "miraclo_lg_qs"

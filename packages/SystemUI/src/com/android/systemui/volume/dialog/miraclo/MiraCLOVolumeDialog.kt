@@ -189,7 +189,7 @@ class MiraCLOVolumeDialog(
                 Configuration.UI_MODE_NIGHT_YES
         panel.setLook(
             dark = dark,
-            liquid = MiraCLOLiquidGlass.isEnabled(ctx),
+            liquid = MiraCLOLiquidGlass.isEnabled(ctx, MiraCLOLiquidGlass.VOLUME),
             fill = ctx.getColor(com.android.internal.R.color.materialColorPrimary),
             onFill = ctx.getColor(com.android.internal.R.color.materialColorOnPrimary),
         )

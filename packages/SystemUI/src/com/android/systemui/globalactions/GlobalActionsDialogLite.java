@@ -137,6 +137,8 @@ import com.android.systemui.deviceentry.domain.interactor.DeviceEntryInteractor;
 import com.android.systemui.plugins.GlobalActions.GlobalActionsManager;
 import com.android.systemui.plugins.GlobalActionsPanelPlugin;
 import com.android.systemui.scene.shared.flag.SceneContainerFlag;
+import com.android.systemui.miraclo.MiraCLOGlassDrawable;
+import com.android.systemui.miraclo.MiraCLOLiquidGlass;
 import com.android.systemui.scrim.ScrimDrawable;
 import com.android.systemui.settings.UserTracker;
 import com.android.systemui.shade.ShadeController;
@@ -609,14 +611,23 @@ public class GlobalActionsDialogLite implements DialogInterface.OnDismissListene
         mHandler.sendEmptyMessage(MESSAGE_DISMISS);
     }
 
+    // MiraCLO: Liquid Glass power menu (Settings > Display > Liquid Glass > Power menu).
+    private boolean mMiraCLOGlass;
+
     private void handleShow(@Nullable Expandable expandable, int displayId) {
+        mMiraCLOGlass = MiraCLOLiquidGlass.isEnabled(mContext, MiraCLOLiquidGlass.POWER);
         SystemUIDialog dialog = createDialog(displayId);
         prepareDialog();
 
         WindowManager.LayoutParams attrs = dialog.getWindow().getAttributes();
         attrs.setTitle("GlobalActionsDialogLite");
         attrs.layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
-        if (isVolumeAndPowerBlurEnabled() && mTranslucentPowerMenu) {
+        if (mMiraCLOGlass) {
+            // Liquid Glass: what is behind stays visible, softly blurred.
+            attrs.flags |= WindowManager.LayoutParams.FLAG_BLUR_BEHIND;
+            attrs.setBlurBehindRadius(Math.round(
+                    14 * mContext.getResources().getDisplayMetrics().density));
+        } else if (isVolumeAndPowerBlurEnabled() && mTranslucentPowerMenu) {
             attrs.flags |= WindowManager.LayoutParams.FLAG_BLUR_BEHIND;
             attrs.setBlurBehindRadius(mContext.getResources().getDimensionPixelSize(
                     com.android.systemui.res.R.dimen.global_actions_blur_radius));
@@ -2264,6 +2275,11 @@ public class GlobalActionsDialogLite implements DialogInterface.OnDismissListene
             messageView.setSelected(true); // necessary for marquee to work
             mIconView.setImageDrawable(getIcon(context));
             mIconView.setScaleType(ScaleType.CENTER_CROP);
+            if (mMiraCLOGlass) {
+                final float d = context.getResources().getDisplayMetrics().density;
+                mIconView.setBackground(new MiraCLOGlassDrawable(
+                        miracloIsDark(context) ? 0x26FFFFFF : 0x73FFFFFF, -1f, 1.3f * d));
+            }
             if (isTv()) {
                 mIconView.setFocusable(true);
                 mIconView.setClickable(true);
@@ -3034,6 +3050,17 @@ public class GlobalActionsDialogLite implements DialogInterface.OnDismissListene
             if (mBackgroundDrawable == null) {
                 mBackgroundDrawable = new ScrimDrawable();
             }
+            if (MiraCLOLiquidGlass.isEnabled(dialog.getContext(), MiraCLOLiquidGlass.POWER)) {
+                final Context c = dialog.getContext();
+                final View list = dialog.findViewById(android.R.id.list);
+                if (list != null) {
+                    list.setBackground(new MiraCLOGlassDrawable(
+                            miracloIsDark(c) ? 0x4D10131C : 0x59FFFFFF,
+                            c.getResources().getDimension(
+                                    com.android.systemui.res.R.dimen.global_actions_corner_radius),
+                            1.3f * c.getResources().getDisplayMetrics().density, false));
+                }
+            }
             // If user entered from the lock screen and smart lock was enabled, disable it
             int user = mSelectedUserInteractor.getSelectedUserId();
             boolean userHasTrust = mKeyguardUpdateMonitor.getUserHasTrust(user);
@@ -3367,5 +3394,12 @@ public class GlobalActionsDialogLite implements DialogInterface.OnDismissListene
                     @Assisted("onRefreshCallback") @NonNull Runnable onRefreshCallback,
                     @Assisted("rescheduleBurnInTimeout") @NonNull Runnable rescheduleBurnInTimeout);
         }
+    }
+
+    /** MiraCLO: whether the power menu is shown in the dark theme. */
+    static boolean miracloIsDark(Context context) {
+        return (context.getResources().getConfiguration().uiMode
+                & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES;
     }
 }

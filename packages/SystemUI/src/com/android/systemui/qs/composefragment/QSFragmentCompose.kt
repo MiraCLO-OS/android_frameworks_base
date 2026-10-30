@@ -351,7 +351,7 @@ constructor(
             settingsResolver, MiraCLORefraction.KEY, 0, userTracker.userId) != 0
         miracloGlow = miracloLiquidGlass && Settings.Secure.getIntForUser(
             settingsResolver, MiraCLORefraction.KEY_GLOW, 0, userTracker.userId) != 0
-        MiraCLOSplitShade.watch(requireContext())
+        context?.let { MiraCLOSplitShade.watch(it) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

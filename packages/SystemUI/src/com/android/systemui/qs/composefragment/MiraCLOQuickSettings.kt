@@ -5,6 +5,8 @@
 
 package com.android.systemui.qs.composefragment
 
+import com.android.systemui.miraclo.LocalMiraCLORefraction
+import com.android.systemui.miraclo.miracloRefraction
 import android.media.AudioManager
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
@@ -246,8 +248,12 @@ private fun miracloGlass(): MiraCLOGlass {
 private val MiraCLOGlassRim =
     Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f)))
 
+@Composable
 private fun Modifier.glassSurface(glass: MiraCLOGlass, shape: Shape): Modifier =
-    if (glass.liquid) {
+    if (glass.liquid && LocalMiraCLORefraction.current) {
+        // SurfaceFlinger draws the refracting glass and its rim; only the tint is drawn here.
+        this.miracloRefraction(shape, true).clip(shape).background(glass.fill, shape)
+    } else if (glass.liquid) {
         this.clip(shape)
             .background(glass.fill, shape)
             .background(MiraCLOLiquidHighlight, shape)

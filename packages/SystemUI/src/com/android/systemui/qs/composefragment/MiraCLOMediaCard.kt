@@ -180,9 +180,9 @@ internal fun MiraCLOMediaCard(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
             ) {
-                MiraCLOMediaButton(buttons?.prevOrCustom, iconSize = 22.dp)
+                MiraCLOMediaButton(buttons?.prevOrCustom, iconSize = 18.dp)
                 MiraCLOPlayPauseButton(buttons?.playOrPause, playing = data.isPlaying == true)
-                MiraCLOMediaButton(buttons?.nextOrCustom, iconSize = 22.dp)
+                MiraCLOMediaButton(buttons?.nextOrCustom, iconSize = 18.dp)
             }
         }
     }
@@ -194,7 +194,7 @@ private fun MiraCLOMediaButton(action: MediaAction?, iconSize: Dp) {
     Box(
         contentAlignment = Alignment.Center,
         modifier =
-            Modifier.size(44.dp)
+            Modifier.size(38.dp)
                 .clip(CircleShape)
                 .clickable(enabled = action?.action != null) { action?.action?.run() }
                 .semantics { contentDescription = action?.contentDescription?.toString().orEmpty() },
@@ -221,7 +221,7 @@ private fun MiraCLOPlayPauseButton(action: MediaAction?, playing: Boolean) {
     Box(
         contentAlignment = Alignment.Center,
         modifier =
-            Modifier.size(44.dp)
+            Modifier.size(38.dp)
                 .clip(CircleShape)
                 .clickable(enabled = action?.action != null) {
                     action?.action?.run()
@@ -229,7 +229,7 @@ private fun MiraCLOPlayPauseButton(action: MediaAction?, playing: Boolean) {
                 }
                 .semantics { contentDescription = if (shown) "Pause" else "Play" },
     ) {
-        Canvas(Modifier.size(26.dp)) {
+        Canvas(Modifier.size(21.dp)) {
             val w = size.width
             val h = size.height
             if (shown) {

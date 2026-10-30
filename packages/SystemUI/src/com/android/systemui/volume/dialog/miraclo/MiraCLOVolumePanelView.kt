@@ -80,8 +80,11 @@ class MiraCLOVolumePanelView(context: Context) : View(context) {
     var onLeft = false
 
     private val density = resources.displayMetrics.density
-    private fun dp(v: Float) = v * density
-    private fun dp(v: Int) = v * density
+    // Everything is laid out in the mock's sizes and drawn a little smaller (SCALE).
+    private fun dp(v: Float) = v * density * SCALE
+    private fun dp(v: Int) = v * density * SCALE
+    /** Text sizes: shrunk less than the shapes so labels stay easy to read. */
+    private fun sp(v: Float) = v * density * TEXT_SCALE
 
     private var look = lookFor(dark = true, liquid = false)
     private var fillColor = 0xFF3E91FF.toInt()
@@ -384,7 +387,7 @@ class MiraCLOVolumePanelView(context: Context) : View(context) {
             val sw = dp(52)
             val gap = dp(30)
             val x0 = ox + (cw - (n * sw + (n - 1) * gap)) / 2f
-            text.textSize = dp(12.5f)
+            text.textSize = sp(12.5f)
             text.textAlign = Paint.Align.CENTER
             text.color = withAlpha(L.text, a)
             for ((i, stream) in streams.withIndex()) {
@@ -400,13 +403,13 @@ class MiraCLOVolumePanelView(context: Context) : View(context) {
         canvas.drawRoundRect(tmp, dp(29), dp(29), fill)
         icon(canvas, if (outputBluetooth) "head" else "spk", ox + dp(45), oy + dp(429), dp(22),
             withAlpha(L.text, a))
-        textMedium.textSize = dp(15)
+        textMedium.textSize = sp(15f)
         textMedium.textAlign = Paint.Align.LEFT
         textMedium.color = withAlpha(L.text, a)
         val maxText = cw - dp(68 + 60)
         canvas.drawText(ellipsize(outputTitle, textMedium, maxText), ox + dp(68), oy + dp(425),
             textMedium)
-        text.textSize = dp(12)
+        text.textSize = sp(12f)
         text.textAlign = Paint.Align.LEFT
         text.color = withAlpha(L.text2, a)
         canvas.drawText(ellipsize(outputSubtitle, text, maxText), ox + dp(68), oy + dp(444), text)
@@ -441,7 +444,7 @@ class MiraCLOVolumePanelView(context: Context) : View(context) {
         icon(canvas, streamIcon(stream), x + w / 2f, iconCy, iconSize,
             withAlpha(if (onFill) onFillColor else L.text, a))
         if (showLevel) {
-            textMedium.textSize = dp(13)
+            textMedium.textSize = sp(13f)
             textMedium.textAlign = Paint.Align.CENTER
             val levelOnFill = fh >= h - dp(30)
             textMedium.color = withAlpha(if (levelOnFill) onFillColor else L.text2, a)
@@ -788,7 +791,9 @@ class MiraCLOVolumePanelView(context: Context) : View(context) {
         const val EDGE = 14f
         const val CARD_H = 478f
         const val CARD_R = 32f
-        const val CARD_MAX_W = 420f
+        const val CARD_MAX_W = 390f
+        const val SCALE = 0.86f
+        const val TEXT_SCALE = 0.94f
 
         val BASE_STREAMS = intArrayOf(
             AudioManager.STREAM_RING, AudioManager.STREAM_NOTIFICATION,

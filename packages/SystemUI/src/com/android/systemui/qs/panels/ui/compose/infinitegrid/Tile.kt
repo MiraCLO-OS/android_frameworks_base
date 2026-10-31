@@ -139,6 +139,40 @@ internal val LocalMiraCLOQsStyle = compositionLocalOf { false }
 /** MiraCLO: Liquid Glass (Settings > Display): clearer glass with a bright specular edge. */
 internal val LocalMiraCLOLiquidGlass = compositionLocalOf { false }
 
+/**
+ * MiraCLO Quick Settings looks, the values of Settings.Secure "miraclo_qs_style" (Settings >
+ * Display > Quick Settings style). Each look has its own tile colours and shapes.
+ */
+internal object MiraCLOLook {
+    const val COLOROS = 1
+    const val IOS = 2
+    const val NOTHING = 3
+    const val ONEUI = 4
+}
+
+/** MiraCLO: the Quick Settings look in use (see [MiraCLOLook]). */
+internal val LocalMiraCLOLook = compositionLocalOf { MiraCLOLook.COLOROS }
+
+/** MiraCLO: round tiles without the label underneath (iOS look, connectivity block). */
+internal val LocalMiraCLOHideTileLabels = compositionLocalOf { false }
+
+/** iOS-style system colours. */
+private val MiraCLOIosBlue = Color(0xFF0A84FF)
+private val MiraCLOIosGreen = Color(0xFF30D158)
+private val MiraCLOIosOrange = Color(0xFFFF9F0A)
+private val MiraCLOIosPurple = Color(0xFF5E5CE6)
+
+/** Nothing-style red, used sparingly for a few tiles. */
+private val MiraCLONothingRed = Color(0xFFD71921)
+
+/** One UI-style blue. */
+private val MiraCLOOneUiBlue = Color(0xFF3E91FF)
+
+private val MIRACLO_GREEN_TILES = setOf("cell", "mobile_data", "mobiledata", "hotspot")
+private val MIRACLO_ORANGE_TILES = setOf("airplane", "battery", "flashlight")
+private val MIRACLO_PURPLE_TILES = setOf("dnd", "modes")
+private val MIRACLO_RED_TILES = setOf("dnd", "screenrecord", "record", "mictoggle", "cameratoggle")
+
 /** Liquid Glass edge: brightest at the top-left and bottom-right, like light catching glass. */
 internal val MiraCLOLiquidRim =
     Brush.linearGradient(
@@ -441,7 +475,12 @@ fun ContentScope.Tile(
                 }
             }
             }
-            if (miracloStyle && iconOnly) {
+            if (miracloStyle && iconOnly &&
+                (LocalMiraCLOLook.current == MiraCLOLook.IOS || LocalMiraCLOHideTileLabels.current)
+            ) {
+                // iOS look: round toggles without labels.
+                tileBody(tooltipModifier)
+            } else if (miracloStyle && iconOnly) {
                 MiraCLOLabeledIconTile(
                     label = uiState.label,
                     labelColor = colors.label,
@@ -721,6 +760,11 @@ private object TileDefaults {
     @Composable
     @ReadOnlyComposable
     fun miracloColorsForState(uiState: TileUiState, iconOnly: Boolean, spec: String): TileColors {
+        when (LocalMiraCLOLook.current) {
+            MiraCLOLook.IOS -> return miracloIosColors(uiState, iconOnly, spec)
+            MiraCLOLook.NOTHING -> return miracloNothingColors(uiState, iconOnly, spec)
+            MiraCLOLook.ONEUI -> return miracloOneUiColors(uiState, iconOnly)
+        }
         val onSurface = MaterialTheme.colorScheme.onSurface
         val darkPanel = MaterialTheme.colorScheme.surface.luminance() < 0.5f
         val accent = if (spec in MIRACLO_DATA_TILES) MiraCLOGreen else MiraCLOBlue
@@ -763,6 +807,137 @@ private object TileDefaults {
         }
     }
 
+    /**
+     * iOS look: frosted round toggles; an active toggle fills with its system colour (blue,
+     * green for data and hotspot, orange, purple for modes) and the icon turns white.
+     */
+    @Composable
+    @ReadOnlyComposable
+    private fun miracloIosColors(uiState: TileUiState, iconOnly: Boolean, spec: String): TileColors {
+        val onSurface = MaterialTheme.colorScheme.onSurface
+        val darkPanel = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+        val liquid = LocalMiraCLOLiquidGlass.current
+        val accent =
+            when (spec) {
+                in MIRACLO_GREEN_TILES -> MiraCLOIosGreen
+                in MIRACLO_ORANGE_TILES -> MiraCLOIosOrange
+                in MIRACLO_PURPLE_TILES -> MiraCLOIosPurple
+                else -> MiraCLOIosBlue
+            }
+        val glass =
+            if (darkPanel) Color.White.copy(alpha = if (liquid) 0.08f else 0.14f)
+            else Color.White.copy(alpha = if (liquid) 0.32f else 0.50f)
+        val bubbleOff =
+            if (darkPanel) Color.White.copy(alpha = 0.16f) else Color.Black.copy(alpha = 0.07f)
+        val secondary = onSurface.copy(alpha = 0.65f)
+        return when (uiState.visualState) {
+            STATE_ACTIVE ->
+                TileColors(
+                    background = if (iconOnly) accent else glass,
+                    iconBackground = accent,
+                    label = onSurface,
+                    secondaryLabel = secondary,
+                    icon = Color.White,
+                )
+            STATE_INACTIVE ->
+                TileColors(
+                    background = glass,
+                    iconBackground = bubbleOff,
+                    label = onSurface,
+                    secondaryLabel = secondary,
+                    icon = onSurface,
+                )
+            else -> unavailableTileColors()
+        }
+    }
+
+    /**
+     * Nothing look: monochrome. On a dark panel inactive tiles are near-black and active ones
+     * turn white with black content (the reverse on a light panel). A few privacy and focus
+     * tiles light up red instead.
+     */
+    @Composable
+    @ReadOnlyComposable
+    private fun miracloNothingColors(
+        uiState: TileUiState,
+        iconOnly: Boolean,
+        spec: String,
+    ): TileColors {
+        val darkPanel = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+        val liquid = LocalMiraCLOLiquidGlass.current
+        val fg = if (darkPanel) Color.White else Color.Black
+        val bg = if (darkPanel) Color.Black else Color.White
+        val off =
+            if (darkPanel) (if (liquid) Color.White.copy(alpha = 0.08f) else Color(0xFF1B1B1D))
+            else (if (liquid) Color.White.copy(alpha = 0.40f) else Color(0xFFE6E6E6))
+        val red = spec in MIRACLO_RED_TILES
+        return when (uiState.visualState) {
+            STATE_ACTIVE ->
+                if (red) {
+                    TileColors(
+                        background = MiraCLONothingRed,
+                        iconBackground = Color.White.copy(alpha = 0.18f),
+                        label = Color.White,
+                        secondaryLabel = Color.White.copy(alpha = 0.75f),
+                        icon = Color.White,
+                    )
+                } else {
+                    TileColors(
+                        background = fg,
+                        iconBackground = bg.copy(alpha = 0.08f),
+                        label = if (iconOnly) fg else bg,
+                        secondaryLabel = (if (iconOnly) fg else bg).copy(alpha = 0.6f),
+                        icon = bg,
+                    )
+                }
+            STATE_INACTIVE ->
+                TileColors(
+                    background = off,
+                    iconBackground = fg.copy(alpha = 0.06f),
+                    label = fg,
+                    secondaryLabel = fg.copy(alpha = 0.55f),
+                    icon = fg,
+                )
+            else -> unavailableTileColors()
+        }
+    }
+
+    /**
+     * One UI look: soft rounded squares; an active tile fills with blue and its icon and
+     * label turn white.
+     */
+    @Composable
+    @ReadOnlyComposable
+    private fun miracloOneUiColors(uiState: TileUiState, iconOnly: Boolean): TileColors {
+        val onSurface = MaterialTheme.colorScheme.onSurface
+        val darkPanel = MaterialTheme.colorScheme.surface.luminance() < 0.5f
+        val liquid = LocalMiraCLOLiquidGlass.current
+        val off =
+            if (darkPanel) (if (liquid) Color.White.copy(alpha = 0.10f) else Color(0xFF2A2A2E))
+            else (if (liquid) Color.White.copy(alpha = 0.45f) else Color(0xFFFFFFFF))
+        return when (uiState.visualState) {
+            STATE_ACTIVE ->
+                TileColors(
+                    background = MiraCLOOneUiBlue,
+                    iconBackground = Color.White.copy(alpha = 0.18f),
+                    label = if (iconOnly) onSurface else Color.White,
+                    secondaryLabel =
+                        if (iconOnly) onSurface.copy(alpha = 0.65f)
+                        else Color.White.copy(alpha = 0.8f),
+                    icon = Color.White,
+                )
+            STATE_INACTIVE ->
+                TileColors(
+                    background = off,
+                    iconBackground = Color.Transparent,
+                    label = onSurface,
+                    secondaryLabel = onSurface.copy(alpha = 0.6f),
+                    icon = onSurface,
+                )
+            else -> unavailableTileColors()
+        }
+    }
+
     @Composable
     @ReadOnlyComposable
     fun getColorForState(uiState: TileUiState, iconOnly: Boolean): TileColors {
@@ -789,6 +964,9 @@ private object TileDefaults {
 
     @Composable
     fun iconRadius(uiState: TileUiState): Dp {
+        if (LocalMiraCLOQsStyle.current && LocalMiraCLOLook.current == MiraCLOLook.ONEUI) {
+            return 14.dp
+        }
         if (LocalUseCircularQsTileShapes.current || LocalMiraCLOQsStyle.current) {
             return ToggleTargetSize / 2
         }
@@ -801,6 +979,10 @@ private object TileDefaults {
 
     @Composable
     fun tileRadius(uiState: TileUiState): Dp {
+        // MiraCLO One UI look: soft rounded squares instead of circles and pills.
+        if (LocalMiraCLOQsStyle.current && LocalMiraCLOLook.current == MiraCLOLook.ONEUI) {
+            return 22.dp
+        }
         if (LocalUseCircularQsTileShapes.current || LocalMiraCLOQsStyle.current) {
             return TileHeight / 2
         }

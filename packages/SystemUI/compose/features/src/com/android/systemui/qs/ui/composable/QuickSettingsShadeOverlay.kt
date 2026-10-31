@@ -199,13 +199,8 @@ constructor(
         remember { miracloQs.watch() }
         // MiraCLO: ColorOS Quick Settings brings its own glass, so the panel is clear with Liquid
         // Glass and solid dark without it (as in the old shade).
-        val miracloPanelColor: Color? =
-            when {
-                !miracloQs.qsStyle -> null
-                miracloQs.liquidGlass -> Color.Transparent
-                isSystemInDarkTheme() -> Color(0xFF0B0C0F)
-                else -> null
-            }
+        // Each look (ColorOS, iOS, Nothing, One UI) tints the panel its own way.
+        val miracloPanelColor: Color? = miracloQs.panelColor(isSystemInDarkTheme())
 
         Box(
             modifier =

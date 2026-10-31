@@ -91,7 +91,7 @@ private val MiraCLOBrightnessFull = Color(0xFFFF9F0A)
 private const val MIRACLO_FULL_THRESHOLD = 0.995f
 
 /** Matches the media card's own corner radius (Media.kt clips cards to 32dp). */
-private val MiraCLOMediaShape = RoundedCornerShape(32.dp)
+internal val MiraCLOMediaShape = RoundedCornerShape(32.dp)
 
 /**
  * MiraCLO (ColorOS-style) expanded Quick Settings.
@@ -221,7 +221,7 @@ internal fun ContentScope.MiraCLOQuickSettingsLayout(
 }
 
 /** Colours shared by the MiraCLO glass cards, matching the tile glass in Tile.kt. */
-private data class MiraCLOGlass(
+internal data class MiraCLOGlass(
     val fill: Color,
     val iconOff: Color,
     val accent: Color,
@@ -231,7 +231,7 @@ private data class MiraCLOGlass(
 )
 
 @Composable
-private fun miracloGlass(): MiraCLOGlass {
+internal fun miracloGlass(): MiraCLOGlass {
     val onSurface = MaterialTheme.colorScheme.onSurface
     val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     val accent = Color(0xFF1677FF)
@@ -253,7 +253,7 @@ private val MiraCLOGlassRim =
     Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.04f)))
 
 @Composable
-private fun Modifier.glassSurface(glass: MiraCLOGlass, shape: Shape): Modifier =
+internal fun Modifier.glassSurface(glass: MiraCLOGlass, shape: Shape): Modifier =
     if (glass.liquid && LocalMiraCLORefraction.current) {
         // SurfaceFlinger draws the refracting glass and its rim; only the tint is drawn here.
         this.miracloRefraction(shape, true).clip(shape).background(glass.fill, shape)
@@ -284,6 +284,7 @@ private fun MiraCLOVerticalSlider(
     onStop: (Float) -> Unit,
     modifier: Modifier = Modifier,
     fullIconTint: Color? = null,
+    vertical: Boolean = true,
 ) {
     val view = LocalView.current
     var local by remember { mutableFloatStateOf(fraction) }
@@ -305,12 +306,16 @@ private fun MiraCLOVerticalSlider(
                         dragging = true
                         down.consume()
                         val start = local
-                        val height = size.height.coerceAtLeast(1)
+                        // MiraCLO: tall sliders fill upwards, wide ones (4x1) left to right.
+                        val length =
+                            (if (vertical) size.height else size.width).coerceAtLeast(1)
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
                             if (!change.pressed) break
-                            val delta = (down.position.y - change.position.y) / height
+                            val delta =
+                                if (vertical) (down.position.y - change.position.y) / length
+                                else (change.position.x - down.position.x) / length
                             local = (start + delta).coerceIn(0f, 1f)
                             currentOnChange(local)
                             change.consume()
@@ -323,10 +328,17 @@ private fun MiraCLOVerticalSlider(
     ) {
         Box(
             modifier =
-                Modifier.align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .fillMaxHeight(local.coerceIn(0.001f, 1f))
-                    .background(Color.White)
+                if (vertical) {
+                    Modifier.align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .fillMaxHeight(local.coerceIn(0.001f, 1f))
+                        .background(Color.White)
+                } else {
+                    Modifier.align(Alignment.CenterStart)
+                        .fillMaxHeight()
+                        .fillMaxWidth(local.coerceIn(0.001f, 1f))
+                        .background(Color.White)
+                }
         )
         Icon(
             painter = painterResource(iconRes),
@@ -337,16 +349,22 @@ private fun MiraCLOVerticalSlider(
                     local > 0.18f -> iconTint
                     else -> glass.iconOff
                 },
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp).size(26.dp),
+            modifier =
+                if (vertical) {
+                    Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp).size(26.dp)
+                } else {
+                    Modifier.align(Alignment.CenterStart).padding(start = 20.dp).size(24.dp)
+                },
         )
     }
 }
 
 @Composable
-private fun MiraCLOBrightnessSlider(
+internal fun MiraCLOBrightnessSlider(
     viewModel: BrightnessSliderViewModel,
     glass: MiraCLOGlass,
     modifier: Modifier = Modifier,
+    vertical: Boolean = true,
 ) {
     val gamma = viewModel.currentBrightness.value
     val min = viewModel.minBrightness.value
@@ -368,14 +386,16 @@ private fun MiraCLOBrightnessSlider(
         onChange = { f -> scope.launch { viewModel.onDrag(Drag.Dragging(toGamma(f))) } },
         onStop = { f -> scope.launch { viewModel.onDrag(Drag.Stopped(toGamma(f))) } },
         modifier = modifier,
+        vertical = vertical,
     )
 }
 
 @Composable
-private fun MiraCLOVolumeSlider(
+internal fun MiraCLOVolumeSlider(
     audioVolumeInteractor: AudioVolumeInteractor,
     glass: MiraCLOGlass,
     modifier: Modifier = Modifier,
+    vertical: Boolean = true,
 ) {
     val stream = remember { AudioStream(AudioManager.STREAM_MUSIC) }
     val model by
@@ -400,6 +420,7 @@ private fun MiraCLOVolumeSlider(
         onChange = { f -> scope.launch { audioVolumeInteractor.setVolume(stream, toVolume(f)) } },
         onStop = { f -> scope.launch { audioVolumeInteractor.setVolume(stream, toVolume(f)) } },
         modifier = modifier,
+        vertical = vertical,
     )
 }
 
@@ -408,7 +429,7 @@ private fun MiraCLOVolumeSlider(
  * Light panel: coloured bubble with a white icon. Dark panel: white bubble with a coloured icon,
  * the same pairing the active QS tiles use.
  */
-private fun miracloRingerColor(mode: Int): Color =
+internal fun miracloRingerColor(mode: Int): Color =
     when (mode) {
         AudioManager.RINGER_MODE_NORMAL -> Color(0xFF1677FF)
         AudioManager.RINGER_MODE_VIBRATE -> Color(0xFFFF8A00)
@@ -416,7 +437,7 @@ private fun miracloRingerColor(mode: Int): Color =
     }
 
 @Composable
-private fun MiraCLORingerSwitch(
+internal fun MiraCLORingerSwitch(
     audioVolumeInteractor: AudioVolumeInteractor,
     glass: MiraCLOGlass,
     height: Dp,

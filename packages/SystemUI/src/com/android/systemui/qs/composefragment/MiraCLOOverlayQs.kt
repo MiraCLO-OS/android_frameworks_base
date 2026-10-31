@@ -54,6 +54,18 @@ import com.android.systemui.qs.composefragment.ui.GridAnchor
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.InfiniteGridLayout
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOLiquidGlass
 import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOQsStyle
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalMiraCLOLook
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.MiraCLOLook
+import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import com.android.systemui.qs.ui.viewmodel.QuickSettingsContainerViewModel
 import javax.inject.Inject
 
@@ -78,9 +90,18 @@ constructor(
     private val mediaSessions = MiraCLOMediaSessions()
     private var watching = false
 
-    /** ColorOS-style Quick Settings (Settings > Display > QS style). */
+    /** MiraCLO Quick Settings (Settings > Display > Quick Settings style is not Default). */
     var qsStyle by mutableStateOf(false)
         private set
+
+    /** Which MiraCLO look: ColorOS, iOS, Nothing or One UI (see [MiraCLOLook]). */
+    var look by mutableStateOf(MiraCLOLook.COLOROS)
+        private set
+
+    /** Saved layout of each look (Settings.Secure "miraclo_qs_layout_<look>"), null if never edited. */
+    private var layouts by mutableStateOf<Map<Int, String?>>(emptyMap())
+
+    private val editor = MiraCLOQsEditor()
 
     /** Liquid Glass on for Quick Settings. */
     var liquidGlass by mutableStateOf(false)
@@ -116,7 +137,27 @@ constructor(
         }
 
     private fun refresh() {
-        qsStyle = read(KEY_QS_STYLE, 0)
+        val style =
+            try {
+                Settings.Secure.getIntForUser(
+                    context.contentResolver, KEY_QS_STYLE, 0, ActivityManager.getCurrentUser())
+            } catch (_: Exception) {
+                0
+            }
+        qsStyle = style != 0
+        look = if (style in MiraCLOLook.COLOROS..MiraCLOLook.ONEUI) style else MiraCLOLook.COLOROS
+        layouts =
+            LOOKS.associateWith { l ->
+                try {
+                    Settings.Secure.getStringForUser(
+                        context.contentResolver,
+                        MiraCLOQsLayouts.key(l),
+                        ActivityManager.getCurrentUser(),
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+            }
         liquidGlass = read(KEY_LIQUID_GLASS, 0) && read(KEY_LIQUID_GLASS_QS, 1)
         refraction = liquidGlass && read(MiraCLORefraction.KEY, 0)
         glow = liquidGlass && read(MiraCLORefraction.KEY_GLOW, 0)
@@ -140,7 +181,7 @@ constructor(
                 KEY_LIQUID_GLASS_QS,
                 MiraCLORefraction.KEY,
                 MiraCLORefraction.KEY_GLOW,
-            )) {
+            ) + LOOKS.map { MiraCLOQsLayouts.key(it) }) {
             try {
                 context.contentResolver.registerContentObserver(
                     Settings.Secure.getUriFor(key), false, observer, UserHandle.USER_ALL)
@@ -159,6 +200,36 @@ constructor(
         }
         refresh()
     }
+
+    private fun saveLayout(value: String?) {
+        try {
+            Settings.Secure.putStringForUser(
+                context.contentResolver,
+                MiraCLOQsLayouts.key(look),
+                value,
+                ActivityManager.getCurrentUser(),
+            )
+        } catch (_: Exception) {}
+        layouts = layouts + (look to value)
+    }
+
+    /**
+     * Panel colour behind the MiraCLO Quick Settings, per look: clear with Liquid Glass (the
+     * controls bring their own glass), otherwise the tint each system lays over its blur.
+     */
+    fun panelColor(dark: Boolean): Color? =
+        when {
+            !qsStyle -> null
+            liquidGlass -> Color.Transparent
+            look == MiraCLOLook.IOS ->
+                if (dark) Color.Black.copy(alpha = 0.38f) else Color.White.copy(alpha = 0.28f)
+            look == MiraCLOLook.NOTHING ->
+                if (dark) Color.Black.copy(alpha = 0.92f) else Color(0xEBF4F4F4)
+            look == MiraCLOLook.ONEUI ->
+                if (dark) Color(0xC7101012) else Color(0xC7F2F2F5)
+            dark -> Color(0xFF0B0C0F)
+            else -> null
+        }
 
     /** Provides the old shade's Quick Settings options (circular tiles) to [content]. */
     @Composable
@@ -182,7 +253,11 @@ constructor(
     ) {
         DisposableEffect(Unit) {
             mediaDataManager.addListener(mediaSessions)
-            onDispose { mediaDataManager.removeListener(mediaSessions) }
+            onDispose {
+                mediaDataManager.removeListener(mediaSessions)
+                // Closing the panel leaves edit mode without saving.
+                editor.editing = false
+            }
         }
         // The old shade's width: screen minus the stock QS margin and ColorOS's extra 22dp on
         // each side, so every tile keeps exactly its old size.
@@ -192,6 +267,7 @@ constructor(
         val body: @Composable () -> Unit = {
             CompositionLocalProvider(
                 LocalMiraCLOQsStyle provides true,
+                LocalMiraCLOLook provides look,
                 LocalMiraCLOLiquidGlass provides liquidGlass,
                 LocalMiraCLORefraction provides refraction,
                 LocalMiraCLOGlow provides glow,
@@ -200,27 +276,87 @@ constructor(
             ) {
                 Box(modifier = modifier.miracloTouchGlow(glow)) {
                     GridAnchor()
-                    MiraCLOQuickSettingsLayout(
-                        tiles = container.tileGridViewModel.tileViewModels,
-                        gridLayout = container.tileGridViewModel.gridLayout,
-                        infiniteGridLayout = infiniteGridLayout,
-                        brightnessViewModel = container.brightnessSliderViewModel,
-                        audioVolumeInteractor = audioVolumeInteractor,
-                        showMedia = mediaSessions.current != null,
-                        media = { mediaModifier ->
-                            mediaSessions.current?.let { data ->
-                                MiraCLOMediaCard(
-                                    data = data,
-                                    onOpen = { intent ->
-                                        activityStarter.postStartActivityDismissingKeyguard(intent)
-                                    },
-                                    modifier = mediaModifier,
-                                )
-                            }
-                        },
-                        listening = { true },
-                        modifier = Modifier.requiredWidth(width),
-                    )
+                    val tiles = container.tileGridViewModel.tileViewModels
+                    val saved = remember(layouts, look) { MiraCLOQsLayouts.parse(layouts[look]) }
+                    val media: @Composable (Modifier) -> Unit = { mediaModifier ->
+                        mediaSessions.current?.let { data ->
+                            MiraCLOMediaCard(
+                                data = data,
+                                onOpen = { intent ->
+                                    activityStarter.postStartActivityDismissingKeyguard(intent)
+                                },
+                                modifier = mediaModifier,
+                            )
+                        }
+                    }
+                    // ColorOS keeps its classic layout until it is edited; the other looks and
+                    // edited layouts use the editable grid.
+                    if (look != MiraCLOLook.COLOROS || saved != null || editor.editing) {
+                        val layout = saved?.first ?: MiraCLOQsLayouts.defaults(look)
+                        val hidden = saved?.second ?: emptySet()
+                        val controls =
+                            remember(layout, hidden, tiles) { miracloResolve(layout, hidden, tiles) }
+                        MiraCLOQsGrid(
+                            look = look,
+                            controls = controls,
+                            hidden = hidden,
+                            editor = editor,
+                            tiles = tiles,
+                            infiniteGridLayout = infiniteGridLayout,
+                            brightnessViewModel = container.brightnessSliderViewModel,
+                            audioVolumeInteractor = audioVolumeInteractor,
+                            showMedia = mediaSessions.current != null,
+                            media = media,
+                            listening = { true },
+                            onSave = { items, removed ->
+                                saveLayout(MiraCLOQsLayouts.serialize(items, removed))
+                            },
+                            onReset = { saveLayout(null) },
+                            modifier = Modifier.requiredWidth(width),
+                        )
+                    } else Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        MiraCLOQuickSettingsLayout(
+                            tiles = container.tileGridViewModel.tileViewModels,
+                            gridLayout = container.tileGridViewModel.gridLayout,
+                            infiniteGridLayout = infiniteGridLayout,
+                            brightnessViewModel = container.brightnessSliderViewModel,
+                            audioVolumeInteractor = audioVolumeInteractor,
+                            showMedia = mediaSessions.current != null,
+                            media = { mediaModifier ->
+                                mediaSessions.current?.let { data ->
+                                    MiraCLOMediaCard(
+                                        data = data,
+                                        onOpen = { intent ->
+                                            activityStarter.postStartActivityDismissingKeyguard(intent)
+                                        },
+                                        modifier = mediaModifier,
+                                    )
+                                }
+                            },
+                            listening = { true },
+                            modifier = Modifier.requiredWidth(width),
+                        )
+                        // Turns the classic ColorOS layout into the editable grid.
+                        Text(
+                            text = "Edit controls",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier =
+                                Modifier.padding(top = 12.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .clickable {
+                                        editor.start(
+                                            miracloResolve(
+                                                MiraCLOQsLayouts.defaults(MiraCLOLook.COLOROS),
+                                                emptySet(),
+                                                tiles,
+                                            ),
+                                            emptySet(),
+                                        )
+                                    }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                    }
                 }
             }
         }
@@ -232,5 +368,8 @@ constructor(
         const val KEY_QS_STYLE = "miraclo_qs_style"
         const val KEY_LIQUID_GLASS = "miraclo_liquid_glass"
         const val KEY_LIQUID_GLASS_QS = "miraclo_lg_qs"
+
+        private val LOOKS =
+            listOf(MiraCLOLook.COLOROS, MiraCLOLook.IOS, MiraCLOLook.NOTHING, MiraCLOLook.ONEUI)
     }
 }

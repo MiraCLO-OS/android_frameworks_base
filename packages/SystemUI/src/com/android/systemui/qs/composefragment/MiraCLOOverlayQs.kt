@@ -24,8 +24,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.UserHandle
 import android.provider.Settings
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -35,7 +33,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.dimensionResource
+import com.android.systemui.res.R
+import com.android.systemui.qs.panels.ui.compose.infinitegrid.LocalUseCircularQsTileShapes
 import com.android.compose.animation.scene.ContentScope
 import com.android.compose.theme.PlatformTheme
 import com.android.settingslib.volume.domain.interactor.AudioVolumeInteractor
@@ -86,6 +88,25 @@ constructor(
     private var refraction by mutableStateOf(false)
     private var glow by mutableStateOf(false)
 
+    // Quick Settings options from the old shade (Settings > Display), kept for the Dual Shade.
+    private var circularTiles by mutableStateOf(false)
+
+    /** Settings.System.QS_SHOW_BRIGHTNESS: show the brightness slider in the stock layout. */
+    var showBrightness by mutableStateOf(true)
+        private set
+
+    /** Settings.System.QS_BRIGHTNESS_POSITION_BOTTOM: brightness slider below the tiles. */
+    var brightnessAtBottom by mutableStateOf(false)
+        private set
+
+    private fun readSystem(key: String, def: Int): Boolean =
+        try {
+            Settings.System.getIntForUser(
+                context.contentResolver, key, def, ActivityManager.getCurrentUser()) != 0
+        } catch (_: Exception) {
+            def != 0
+        }
+
     private fun read(key: String, def: Int): Boolean =
         try {
             Settings.Secure.getIntForUser(
@@ -99,6 +120,9 @@ constructor(
         liquidGlass = read(KEY_LIQUID_GLASS, 0) && read(KEY_LIQUID_GLASS_QS, 1)
         refraction = liquidGlass && read(MiraCLORefraction.KEY, 0)
         glow = liquidGlass && read(MiraCLORefraction.KEY_GLOW, 0)
+        circularTiles = readSystem(Settings.System.QS_TILES_CIRCULAR, 0)
+        showBrightness = readSystem(Settings.System.QS_SHOW_BRIGHTNESS, 1)
+        brightnessAtBottom = readSystem(Settings.System.QS_BRIGHTNESS_POSITION_BOTTOM, 0)
     }
 
     /** Starts following the settings; safe to call many times. */
@@ -122,37 +146,57 @@ constructor(
                     Settings.Secure.getUriFor(key), false, observer, UserHandle.USER_ALL)
             } catch (_: Exception) {}
         }
+        for (key in
+            listOf(
+                Settings.System.QS_TILES_CIRCULAR,
+                Settings.System.QS_SHOW_BRIGHTNESS,
+                Settings.System.QS_BRIGHTNESS_POSITION_BOTTOM,
+            )) {
+            try {
+                context.contentResolver.registerContentObserver(
+                    Settings.System.getUriFor(key), false, observer, UserHandle.USER_ALL)
+            } catch (_: Exception) {}
+        }
         refresh()
     }
 
+    /** Provides the old shade's Quick Settings options (circular tiles) to [content]. */
+    @Composable
+    fun ProvideOptions(content: @Composable () -> Unit) {
+        CompositionLocalProvider(
+            LocalUseCircularQsTileShapes provides circularTiles,
+            content = content,
+        )
+    }
+
     /**
-     * The MiraCLO Quick Settings body. [settled] is true once the overlay has finished opening:
-     * SurfaceFlinger draws the refraction glass, so it fades in only then instead of trailing
-     * the panel while it moves.
+     * The MiraCLO Quick Settings body, the same size as in the old shade. [glassAlpha] follows
+     * the panel's open / close progress so the SurfaceFlinger glass fades with it, as in the
+     * old shade.
      */
     @Composable
     fun ContentScope.Content(
         container: QuickSettingsContainerViewModel,
-        settled: Boolean,
+        glassAlpha: () -> Float,
         modifier: Modifier = Modifier,
     ) {
         DisposableEffect(Unit) {
             mediaDataManager.addListener(mediaSessions)
             onDispose { mediaDataManager.removeListener(mediaSessions) }
         }
-        val glassAlpha by
-            animateFloatAsState(
-                if (settled) 1f else 0f,
-                tween(durationMillis = if (settled) 180 else 90),
-                label = "MiraCLOOverlayGlass",
-            )
+        // The old shade's width: screen minus the stock QS margin and ColorOS's extra 22dp on
+        // each side, so every tile keeps exactly its old size.
+        val width =
+            LocalConfiguration.current.screenWidthDp.dp -
+                (dimensionResource(R.dimen.qs_horizontal_margin) + 22.dp) * 2
         val body: @Composable () -> Unit = {
             CompositionLocalProvider(
                 LocalMiraCLOQsStyle provides true,
                 LocalMiraCLOLiquidGlass provides liquidGlass,
                 LocalMiraCLORefraction provides refraction,
                 LocalMiraCLOGlow provides glow,
-                LocalMiraCLOGlassAlpha provides { glassAlpha },
+                LocalMiraCLOGlassAlpha provides glassAlpha,
+                LocalUseCircularQsTileShapes provides circularTiles,
             ) {
                 Box(modifier = modifier.miracloTouchGlow(glow)) {
                     GridAnchor()
@@ -175,7 +219,7 @@ constructor(
                             }
                         },
                         listening = { true },
-                        modifier = Modifier.padding(horizontal = 6.dp),
+                        modifier = Modifier.requiredWidth(width),
                     )
                 }
             }

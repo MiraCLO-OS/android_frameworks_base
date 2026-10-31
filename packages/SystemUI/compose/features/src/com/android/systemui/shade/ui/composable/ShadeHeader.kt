@@ -17,6 +17,7 @@
 
 package com.android.systemui.shade.ui.composable
 
+import com.android.systemui.miraclo.MiraCLOShadeChips
 import android.content.res.Configuration.ORIENTATION_PORTRAIT
 import android.view.ContextThemeWrapper
 import android.view.Gravity
@@ -377,6 +378,16 @@ fun ContentScope.OverlayShadeHeader(
     showClock: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // MiraCLO: without chip backgrounds, chip text and icons use the normal shade colours so
+    // they stay readable (a "strong" chip's colours are made for its own background).
+    val miracloContext = LocalContext.current
+    remember { MiraCLOShadeChips.watch(miracloContext) }
+    @Suppress("NAME_SHADOWING")
+    val notificationsHighlight =
+        if (MiraCLOShadeChips.enabled) notificationsHighlight else ChipHighlightModel.Transparent
+    @Suppress("NAME_SHADOWING")
+    val quickSettingsHighlight =
+        if (MiraCLOShadeChips.enabled) quickSettingsHighlight else ChipHighlightModel.Transparent
     val horizontalPadding =
         maxOf(
             LocalScreenCornerRadius.current / 2f,

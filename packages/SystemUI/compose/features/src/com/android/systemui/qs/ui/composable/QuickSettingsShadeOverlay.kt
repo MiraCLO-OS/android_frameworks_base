@@ -160,10 +160,12 @@ constructor(
                 contentViewModelFactory.create(coroutineScope)
             }
         val useBrightnessMirrorInOverlay = useBrightnessMirrorInOverlay()
+        // MiraCLO: the ColorOS brightness slider has no mirror; a stuck mirror would fade the
+        // panel and turn its gestures off.
         val quickSettingsContainerViewModel =
-            rememberViewModel("QuickSettingsShadeOverlayContainer") {
+            rememberViewModel("QuickSettingsShadeOverlayContainer", key = miracloQs.qsStyle) {
                 quickSettingsContainerViewModelFactory.create(
-                    supportsBrightnessMirroring = useBrightnessMirrorInOverlay
+                    supportsBrightnessMirroring = useBrightnessMirrorInOverlay && !miracloQs.qsStyle
                 )
             }
         val hunPlaceholderViewModel =
@@ -346,17 +348,27 @@ private fun ContentScope.QuickSettingsContainer(
                 // below it like the ColorOS footer.
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier =
-                        modifier
-                            .sysuiResTag("quick_settings_panel")
-                            .padding(horizontal = QuickSettingsShade.Dimensions.HorizontalPadding),
+                    modifier = modifier.sysuiResTag("quick_settings_panel"),
                 ) {
                     VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
-                    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                    ) {
                         with(miracloQs) {
                             Content(
                                 container = containerViewModel,
-                                settled = layoutState.isIdle(contentKey),
+                                glassAlpha = {
+                                    // Follows the panel opening and closing, like the old shade.
+                                    val t = layoutState.transitionState
+                                    if (t is TransitionState.Transition &&
+                                        t.isTransitioningFromOrTo(contentKey)
+                                    ) {
+                                        t.progressTo(contentKey).coerceIn(0f, 1f)
+                                    } else {
+                                        1f
+                                    }
+                                },
                             )
                         }
                         VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
@@ -374,8 +386,9 @@ private fun ContentScope.QuickSettingsContainer(
                         VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
                     }
                 }
-            } else {
+            } else miracloQs.ProvideOptions {
                 QuickSettingsLayout(
+                    miracloQs = miracloQs,
                     qsContainerViewModel = containerViewModel,
                     toolbarViewModelFactory = contentViewModel.toolbarViewModelFactory,
                     buildNumberViewModelFactory = contentViewModel.buildNumberViewModelFactory,
@@ -392,6 +405,7 @@ private fun ContentScope.QuickSettingsContainer(
 /** Column containing Brightness and QS tiles. */
 @Composable
 private fun ContentScope.QuickSettingsLayout(
+    miracloQs: MiraCLOOverlayQs,
     qsContainerViewModel: QuickSettingsContainerViewModel,
     toolbarViewModelFactory: ToolbarViewModel.Factory,
     buildNumberViewModelFactory: BuildNumberViewModel.Factory,
@@ -449,7 +463,8 @@ private fun ContentScope.QuickSettingsLayout(
                 VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
             }
 
-            if (qsContainerViewModel.isBrightnessSliderVisible) {
+            // MiraCLO: the old shade's brightness options (show, above or below the tiles).
+            val brightnessSlider: @Composable () -> Unit = {
                 Box(
                     Modifier.systemGestureExclusionInShade(
                         enabled = { layoutState.transitionState is TransitionState.Idle }
@@ -468,6 +483,9 @@ private fun ContentScope.QuickSettingsLayout(
                     )
                 }
             }
+            val showBrightness =
+                qsContainerViewModel.isBrightnessSliderVisible && miracloQs.showBrightness
+            if (showBrightness && !miracloQs.brightnessAtBottom) brightnessSlider()
 
             if (volumeSliderViewModel != null) {
                 val volumeSliderState by volumeSliderViewModel.slider.collectAsStateWithLifecycle()
@@ -533,6 +551,10 @@ private fun ContentScope.QuickSettingsLayout(
                 modifier = Modifier.fillMaxWidth(),
                 enableRevealEffect = TileRevealFlag.isEnabled,
             )
+            if (showBrightness && miracloQs.brightnessAtBottom) {
+                VerticalSeparator(QuickSettingsShade.Dimensions.VerticalPadding)
+                brightnessSlider()
+            }
 
             val buildNumberViewModel =
                 rememberViewModel("QuickSettingsShadeOverlay.BuildNumber") {
